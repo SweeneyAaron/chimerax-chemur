@@ -1,0 +1,50 @@
+[build-system]
+requires = ["ChimeraX-BundleBuilder"]
+build-backend = "chimerax.bundle_builder.cx_pep517"
+
+[project]
+name = "ChimeraX-ChemeleonX"
+# 0.2, not 0.1: the rename makes this a different distribution to pip, so this is
+# not an in-place upgrade of ChimeraX-ProPLID 0.1 -- uninstall that one first.
+version = "0.2"
+description = "Predict and visualize biomolecular interactions with ChemeleonX"
+authors = [{ name = "Aaron Sweeney", email = "ucbtasw@ucl.ac.uk" }]
+requires-python = ">=3.10"
+# ChimeraX's `toolshed install` passes the toolshed as --extra-index-url rather
+# than --index-url, so PyPI stays the primary index and the engine resolves from
+# there automatically.
+dependencies = [
+  "ChimeraX-Core ~=1.8",
+  "chemeleonx >=0.1,<0.2",
+]
+dynamic = ["classifiers"]
+
+[project.readme]
+content-type = "text/markdown"
+file = "README.md"
+
+[project.urls]
+Homepage = "https://github.com/SweeneyAaron/chimerax-chemeleonx"
+Engine = "https://github.com/SweeneyAaron/chemeleonx"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.chimerax]
+category = "Structure Analysis"
+min-session-version = 1
+max-session-version = 1
+pure = true
+
+[tool.chimerax.command."chemeleonx interactions"]
+category = "Structure Analysis"
+synopsis = "Predict ChemeleonX interactions for a structure and draw them as pseudobonds"
+
+[tool.chimerax.command."chemeleonx trajectory"]
+category = "Structure Analysis"
+synopsis = "Analyse ChemeleonX interactions per frame across an MD trajectory"
+
+[tool.chimerax.tool."ChemeleonX"]
+category = "Structure Analysis"
+synopsis = "Predict biomolecular interactions with ChemeleonX"
