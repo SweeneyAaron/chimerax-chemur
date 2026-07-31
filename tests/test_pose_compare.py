@@ -23,7 +23,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 def _load(sub):
     # Distinct from test_runner_mapping's synthetic package so the two loaders
     # never share package state (collection order would otherwise matter).
-    pkg_name = "chemeleonx_chimerax_plugin_pose_test"
+    pkg_name = "chemur_chimerax_plugin_pose_test"
     if pkg_name not in sys.modules:
         pkg = types.ModuleType(pkg_name)
         pkg.__path__ = [str(_SRC)]

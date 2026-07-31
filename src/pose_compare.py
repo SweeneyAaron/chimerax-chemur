@@ -1,4 +1,4 @@
-"""Compare ChemeleonX interactions of several docked ligand poses against one receptor.
+"""Compare Chemur interactions of several docked ligand poses against one receptor.
 
 For each selected pose model, runs the engine on the pose (merged with the
 receptor when the pose is ligand-only, or standalone when it already contains the
@@ -288,7 +288,7 @@ def compute_pose_comparison(session, receptor, poses, run_kwargs, *,
             _addh_and_clear(session, [receptor], add_hydrogens)
             receptor_path = save_models_mmcif(session, [receptor])
         except Exception as e:
-            session.logger.warning("ChemeleonX poses: could not pre-save receptor (%s)" % e)
+            session.logger.warning("Chemur poses: could not pre-save receptor (%s)" % e)
 
     pose_metas = []
     per_pose_hits = []
@@ -302,7 +302,7 @@ def compute_pose_comparison(session, receptor, poses, run_kwargs, *,
                     session, pose, receptor, draw=False,
                     receptor_path=receptor_path, **kwargs)
             except Exception as e:
-                session.logger.warning("ChemeleonX poses: skipped %s (%s)" % (name, e))
+                session.logger.warning("Chemur poses: skipped %s (%s)" % (name, e))
                 pose_metas.append((pose, name, False))
                 per_pose_hits.append([])
                 if progress is not None:
@@ -313,7 +313,7 @@ def compute_pose_comparison(session, receptor, poses, run_kwargs, *,
             if skipped:
                 n_untemplated += 1
                 session.logger.warning(
-                    "ChemeleonX poses: %s ligand(s) in %s could not be templated and "
+                    "Chemur poses: %s ligand(s) in %s could not be templated and "
                     "were skipped (%s)." % (len(skipped), name, ", ".join(sorted(skipped))))
 
             hits = _hits_from_rows(prun.rows) if prun.rows else _hits_from_result(prun.result)

@@ -1,9 +1,9 @@
-"""Serialize ChemeleonX interaction rows to JSON or CSV.
+"""Serialize Chemur interaction rows to JSON or CSV.
 
 Operates on the plugin's own ``InteractionRow``/``Endpoint`` objects (see
 runner.py), i.e. exactly what the results tree shows after atom mapping and the
 UI filters. This is deliberately separate from the engine's
-``AnalysisResult.to_json()/to_csv()`` (in src/chemeleonx/models.py), which serialize
+``AnalysisResult.to_json()/to_csv()`` (in src/chemur/models.py), which serialize
 the pre-mapping engine model.
 """
 

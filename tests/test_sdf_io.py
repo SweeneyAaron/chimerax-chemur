@@ -19,7 +19,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def _load_sdf_io():
-    name = "chemeleonx_chimerax_plugin_sdf_io"
+    name = "chemur_chimerax_plugin_sdf_io"
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, _SRC / "sdf_io.py")
         mod = importlib.util.module_from_spec(spec)

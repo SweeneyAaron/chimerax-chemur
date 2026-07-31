@@ -11,7 +11,7 @@ from pathlib import Path
 
 _EXPORT_PATH = (Path(__file__).resolve().parent.parent
                 / "src" / "export.py")
-_spec = importlib.util.spec_from_file_location("chemeleonx_chimerax_export", _EXPORT_PATH)
+_spec = importlib.util.spec_from_file_location("chemur_chimerax_export", _EXPORT_PATH)
 export = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(export)
 

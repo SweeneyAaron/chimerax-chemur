@@ -1,11 +1,11 @@
 """Write a ChimeraX structure to an MDL V2000 SDF (molfile) for the engine.
 
 A docked ligand loaded from an SDF carries its bond orders on each ChimeraX
-``Bond`` (the SDF reader registers a ``Bond.order`` attribute). ChemeleonX's engine
+``Bond`` (the SDF reader registers a ``Bond.order`` attribute). Chemur's engine
 is template-driven and only recovers ligand chemistry from a SMILES/CCD/SDF, NOT
 from a ChimeraX-written mmCIF (which loses bond orders). So to analyse a docked
 ligand we re-emit it as an SDF — preserving element, coordinates and bond order —
-and hand that to ``chemeleonx.analyze(receptor, ligand_sdf=[...])``, whose RDKit path
+and hand that to ``chemur.analyze(receptor, ligand_sdf=[...])``, whose RDKit path
 reconstructs the full chemistry.
 
 ChimeraX has no SDF *saver*, hence this small writer. Pure string/IO so it is
@@ -52,7 +52,7 @@ def molfile_text(atoms, bonds_with_order, name="LIG"):
     if n_atoms > _MAX_V2000 or n_bonds > _MAX_V2000:
         raise ValueError("structure too large for a V2000 molfile (>999 atoms/bonds)")
 
-    lines = [name[:80], "  ChemeleonX", ""]
+    lines = [name[:80], "  Chemur", ""]
     lines.append("%3d%3d  0  0  0  0  0  0  0  0999 V2000" % (n_atoms, n_bonds))
     for symbol, (x, y, z), _charge in atoms:
         lines.append("%10.4f%10.4f%10.4f %-3s 0  0  0  0  0  0  0  0  0  0  0  0"

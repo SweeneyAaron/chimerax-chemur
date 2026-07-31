@@ -1,4 +1,4 @@
-"""Tests for the ChimeraX plugin's ChemeleonX-atom -> ChimeraX-atom back-mapping.
+"""Tests for the ChimeraX plugin's Chemur-atom -> ChimeraX-atom back-mapping.
 
 The plugin used to resolve atoms purely by ``(chain, residue_id, residue_name,
 atom_name)``. On large multi-copy assemblies (e.g. 6PUW, the HIV-integrase
@@ -7,7 +7,7 @@ atom in a *different* copy 10+ Å away and draw a bogus long interaction line.
 
 These tests exercise the coordinate-primary resolver in ``runner.py`` without
 needing a running ChimeraX: the module is loaded as a synthetic package and the
-ChimeraX/ChemeleonX objects are replaced with light stubs that expose only the
+ChimeraX/Chemur objects are replaced with light stubs that expose only the
 attributes the resolver touches.
 """
 
@@ -25,7 +25,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 
 def _load_runner():
     """Load ``runner.py`` (and its pure ``colors`` dependency) outside ChimeraX."""
-    pkg_name = "chemeleonx_chimerax_plugin_under_test"
+    pkg_name = "chemur_chimerax_plugin_under_test"
     if pkg_name not in sys.modules:
         pkg = types.ModuleType(pkg_name)
         pkg.__path__ = [str(_SRC)]
@@ -66,7 +66,7 @@ class _Structure:
 
 
 class _Rec:
-    """Minimal stand-in for a ChemeleonX ``AtomRecord``."""
+    """Minimal stand-in for a Chemur ``AtomRecord``."""
 
     def __init__(self, name, coord, chain_id, residue_id, residue_name):
         self.name = name
@@ -93,7 +93,7 @@ def test_coordinate_resolves_correct_copy_not_first():
     # The name index keeps the first copy (the old, buggy behaviour).
     assert name_index[("B", "1", "KLQ", "C1")] is atom_a
 
-    # A ChemeleonX record for the *second* copy must resolve to atom_b by coordinate,
+    # A Chemur record for the *second* copy must resolve to atom_b by coordinate,
     # not collapse onto atom_a 34 Å away.
     rec = _Rec("C1", (20.0, 20.0, 20.0), "B", "1", "KLQ")
     assert runner._resolve_atom(rec, coord_index, name_index) is atom_b

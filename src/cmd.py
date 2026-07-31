@@ -1,4 +1,4 @@
-"""The ``chemeleonx interactions`` ChimeraX command."""
+"""The ``chemur interactions`` ChimeraX command."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from chimerax.core.commands import CmdDesc, register, BoolArg, FloatArg, IntArg,
 from chimerax.atomic import AtomicStructureArg
 
 
-def chemeleonx_interactions(session, structure, protonate=False, pH=7.4,
+def chemur_interactions(session, structure, protonate=False, pH=7.4,
                          profile="default", ligandSmiles=None, addHydrogens=True,
                          selectedOnly=False, skipProteinNucleic=False):
     from .runner import run_interactions
@@ -45,14 +45,14 @@ def parse_ligand_smiles(spec):
     return out or None
 
 
-def chemeleonx_trajectory(session, structure, excludeSolvent=True, excludeIons=True,
+def chemur_trajectory(session, structure, excludeSolvent=True, excludeIons=True,
                        start=0, stop=None, stride=1, processes=1,
                        profile="default", ligandSmiles=None, protonate=False, pH=7.4):
     """Analyse interactions per frame across a loaded trajectory; returns the run."""
     from .runner import run_trajectory
 
     def _progress(done, total):
-        session.logger.status("ChemeleonX trajectory: frame %d/%d" % (done, total))
+        session.logger.status("Chemur trajectory: frame %d/%d" % (done, total))
 
     return run_trajectory(
         session,
@@ -82,7 +82,7 @@ _desc = CmdDesc(
         ("selectedOnly", BoolArg),
         ("skipProteinNucleic", BoolArg),
     ],
-    synopsis="Predict ChemeleonX interactions and draw them as pseudobonds",
+    synopsis="Predict Chemur interactions and draw them as pseudobonds",
 )
 
 
@@ -100,14 +100,14 @@ _traj_desc = CmdDesc(
         ("protonate", BoolArg),
         ("pH", FloatArg),
     ],
-    synopsis="Analyse ChemeleonX interactions per frame across an MD trajectory",
+    synopsis="Analyse Chemur interactions per frame across an MD trajectory",
 )
 
 
 def register_command(name, logger):
     # ChimeraX calls this once per command declared in pyproject.toml; register the
     # matching handler by name.
-    if name == "chemeleonx trajectory":
-        register("chemeleonx trajectory", _traj_desc, chemeleonx_trajectory, logger=logger)
+    if name == "chemur trajectory":
+        register("chemur trajectory", _traj_desc, chemur_trajectory, logger=logger)
     else:
-        register("chemeleonx interactions", _desc, chemeleonx_interactions, logger=logger)
+        register("chemur interactions", _desc, chemur_interactions, logger=logger)

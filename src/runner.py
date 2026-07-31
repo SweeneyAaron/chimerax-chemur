@@ -1,9 +1,9 @@
-"""Bridge between an open ChimeraX structure and the ChemeleonX engine.
+"""Bridge between an open ChimeraX structure and the Chemur engine.
 
 Shared by the command (cmd.py) and the GUI tool (tool.py):
 
-  open structure -> (optional addh) -> temp mmCIF -> chemeleonx.analyze()
-                 -> map ChemeleonX atoms back to ChimeraX atoms
+  open structure -> (optional addh) -> temp mmCIF -> chemur.analyze()
+                 -> map Chemur atoms back to ChimeraX atoms
                  -> (optional) filter by selection / biopolymer-internal
                  -> draw interactions as pseudobonds
                  -> return rows for display
@@ -16,8 +16,8 @@ import tempfile
 
 from .colors import style_for
 
-PBG_NAME = "ChemeleonX interactions"
-_PI_MARKERSET_NAME = "ChemeleonX π-centres"
+PBG_NAME = "Chemur interactions"
+_PI_MARKERSET_NAME = "Chemur π-centres"
 _PI_MARKER_RADIUS = 0.4   # Å; small dot at each ring centre
 # ChimeraX's create_marker makes marker atoms element 'H', so a user 'delete H'
 # would remove every ring-centre marker (and thus every π pseudobond). Re-element
@@ -140,7 +140,7 @@ class PoseInteractionRun:
 
     ``rows`` are :class:`InteractionRow`s mapped back to live ChimeraX atoms (the
     pseudobond is ``None`` unless drawn). ``result`` is the engine
-    :class:`chemeleonx.models.AnalysisResult`, kept so a caller can read interacting
+    :class:`chemur.models.AnalysisResult`, kept so a caller can read interacting
     residues straight from the engine output when atom mapping fails.
     ``fully_mapped`` is ``False`` when the pose ligand's atoms could not be
     resolved to ChimeraX atoms (so ``rows`` is empty and the engine-residue
@@ -158,7 +158,7 @@ class PoseInteractionRun:
 class TrajectoryRun:
     """Result of :func:`run_trajectory`.
 
-    ``result`` is the engine :class:`chemeleonx.trajectory.TrajectoryResult`.
+    ``result`` is the engine :class:`chemur.trajectory.TrajectoryResult`.
     ``key_to_atoms`` maps each interaction key (``result.interaction_key(...)``)
     to the ChimeraX :class:`Atom` objects involved, so the GUI can select them in
     3D. ``key_to_endpoints`` maps each key to its endpoint atom groups (one inner
@@ -189,11 +189,11 @@ def run_interactions(session, structure, *, protonate=False, protonate_ph=7.4,
                      profile="default", ligand_smiles=None, add_hydrogens=True,
                      rule_overrides=None, selected_only=False,
                      skip_biopolymer_internal=False):
-    """Run ChemeleonX on ``structure``, draw interactions, and return rows.
+    """Run Chemur on ``structure``, draw interactions, and return rows.
 
     ``selected_only`` keeps only interactions with at least one selected partner.
     ``skip_biopolymer_internal`` drops protein-protein and nucleic-nucleic contacts.
-    ``rule_overrides`` is passed straight to :func:`chemeleonx.analyze`.
+    ``rule_overrides`` is passed straight to :func:`chemur.analyze`.
 
     Returns an :class:`InteractionRun` (``.rows`` for display, ``.ligand_report``
     with per-non-standard-residue protonation status).
@@ -207,7 +207,7 @@ def run_interactions(session, structure, *, protonate=False, protonate_ph=7.4,
         raise UserError("Select some atoms first, or turn off 'selected atoms only'.")
 
     if add_hydrogens:
-        # ChemeleonX needs explicit donor hydrogens to assign H-bond-like interactions.
+        # Chemur needs explicit donor hydrogens to assign H-bond-like interactions.
         run(session, "addh #%s" % structure.id_string)
 
     # Drop any ring-centre markers left by a previous run *before* saving: the
@@ -240,7 +240,7 @@ def run_interactions(session, structure, *, protonate=False, protonate_ph=7.4,
     skipped = result.metadata.get("skipped_ligands") or {}
     if skipped:
         session.logger.warning(
-            "ChemeleonX skipped %d ligand(s) it could not template: %s"
+            "Chemur skipped %d ligand(s) it could not template: %s"
             % (len(skipped), ", ".join(sorted(skipped)))
         )
 
@@ -263,29 +263,36 @@ def run_interactions(session, structure, *, protonate=False, protonate_ph=7.4,
 
 
 def _import_analyze():
-    """Import ``chemeleonx.analyze`` or raise a UserError explaining how to install."""
+    """Import ``chemur.analyze`` or raise a UserError explaining how to install."""
     from chimerax.core.errors import UserError
     try:
-        from chemeleonx import analyze
+        from chemur import analyze
         return analyze
     except ImportError as e:
         import importlib.util
-        if importlib.util.find_spec("chemeleonx") is None:
+        if importlib.util.find_spec("chemur") is None:
             # Engine genuinely absent from ChimeraX's environment. Install it via
             # ChimeraX's own pip (not '<ChimeraX>/bin/python -m pip', which can land
             # in your user site-packages that ChimeraX does not load).
             raise UserError(
-                "The 'chemeleonx' engine is not installed in ChimeraX's Python.\n"
-                "In ChimeraX's command line run:\n"
-                "    pip install chemeleonx\n"
-                "Verify it landed in ChimeraX with:  pip show chemeleonx"
+                "The 'chemur' engine is not installed in ChimeraX's Python.\n"
+                "It is a declared dependency of this bundle, so normally\n"
+                "    toolshed install ChimeraX-Chemur\n"
+                "pulls it in. To install it on its own, run:\n"
+                "    pip install chemur\n"
+                "Verify it landed in ChimeraX with:  pip show chemur"
             ) from e
         # Engine is present but failed to import (e.g. a broken build or a missing
         # dependency). Surface the real error instead of mislabelling it.
+        # ChimeraX's `pip` command takes a single requirement and has no
+        # --force-reinstall, so a refresh is uninstall-then-install. The restart is
+        # load-bearing: sys.modules already holds the broken partial import.
         raise UserError(
-            "The 'chemeleonx' engine is installed but failed to import: %s\n"
+            "The 'chemur' engine is installed but failed to import: %s\n"
             "Reinstall it into ChimeraX with:\n"
-            "    pip install --force-reinstall chemeleonx"
+            "    pip uninstall chemur\n"
+            "    pip install chemur\n"
+            "then restart ChimeraX."
             % e
         ) from e
 
@@ -297,7 +304,7 @@ def _has_protein(structure):
 
 
 def _addh_and_clear(session, structures, add_hydrogens):
-    """Optionally add hydrogens, then clear ChemeleonX π-centre markers before a save.
+    """Optionally add hydrogens, then clear Chemur π-centre markers before a save.
 
     The ring-centre MarkerSet is a child model; left in place 'save models' emits a
     second coordinate block that gemmi rejects (see run_interactions).
@@ -467,7 +474,7 @@ def _draw_interactions(session, structure, interactions, rec_by_id, id_to_atom,
                        skip_biopolymer_internal=False, included_types=None):
     """Map ``interactions`` to ChimeraX atoms, (re)draw the pseudobonds, return rows.
 
-    Clears the structure's ChemeleonX pseudobond groups + π markers first, so calling
+    Clears the structure's Chemur pseudobond groups + π markers first, so calling
     this repeatedly (e.g. per trajectory frame) replaces the previous drawing.
     ``included_types`` (optional set) restricts which interaction types are drawn.
     Shared by :func:`run_interactions` and :func:`draw_frame_interactions`.
@@ -533,7 +540,7 @@ def run_trajectory(session, structure, *, exclude_solvent=False, exclude_ions=Fa
                    frame_start=0, frame_stop=None, frame_stride=1, processes=1,
                    profile="default", ligand_smiles=None, protonate=False,
                    protonate_ph=7.4, rule_overrides=None, progress=None):
-    """Analyse ChemeleonX interactions across every selected frame of a trajectory.
+    """Analyse Chemur interactions across every selected frame of a trajectory.
 
     ``structure`` must be a multi-coordset model (an MD trajectory loaded in
     ChimeraX). The loaded coordsets are serialised to a temporary topology mmCIF +
@@ -545,13 +552,16 @@ def run_trajectory(session, structure, *, exclude_solvent=False, exclude_ions=Fa
     from chimerax.core.errors import UserError
 
     try:
-        from chemeleonx.parser import parse_structure
-        from chemeleonx.trajectory import ArrayFrameSource, analyze_trajectory
+        from chemur.parser import parse_structure
+        from chemur.trajectory import ArrayFrameSource, analyze_trajectory
     except ImportError as e:
+        # ArrayFrameSource needs only numpy -- there is no optional extra to install
+        # here, so this means the engine itself is absent or broken.
         raise UserError(
-            "The 'chemeleonx' engine (with trajectory support) is not available in "
-            "ChimeraX's Python: %s\nReinstall the prebuilt wheel as described in the "
-            "repo README." % e
+            "The 'chemur' engine is not available in ChimeraX's Python: %s\n"
+            "Install it with:\n"
+            "    pip install chemur\n"
+            "then restart ChimeraX." % e
         ) from e
 
     if structure.num_coordsets < 2:
@@ -666,7 +676,7 @@ def run_trajectory(session, structure, *, exclude_solvent=False, exclude_ions=Fa
     # pipeline to draw any single frame (see draw_frame_interactions).
     rec_by_id = {rec.atom_id: rec for rec in result.atoms}
     try:
-        from chemeleonx.features import perceive_features
+        from chemur.features import perceive_features
         features_by_id = {
             f.feature_id: f for f in perceive_features(result.atoms, result.components)
         }
@@ -675,7 +685,7 @@ def run_trajectory(session, structure, *, exclude_solvent=False, exclude_ions=Fa
 
     frame_coordset_ids = [coordset_ids[i] for i in result.frame_indices]
     session.logger.info(
-        "ChemeleonX trajectory: analysed %d frames of #%s; %d distinct interactions."
+        "Chemur trajectory: analysed %d frames of #%s; %d distinct interactions."
         % (result.n_frames, structure.id_string, len(result.occupancy()))
     )
     return TrajectoryRun(result, key_to_atoms, key_to_endpoints, structure,
@@ -749,7 +759,7 @@ def _geometry_extra(inter):
     return extra
 
 
-# Max distance (Å) between a ChemeleonX atom and the ChimeraX atom it resolves to.
+# Max distance (Å) between a Chemur atom and the ChimeraX atom it resolves to.
 # Far above 3-dp mmCIF rounding noise, far below any real atom separation, so a
 # wrong-copy mapping (which is 10+ Å off) can never pass.
 _COORD_EPS = 0.05
@@ -765,7 +775,7 @@ def _sq_dist(a, b):
 
 
 def _chimerax_atom_lookup(structure):
-    """Build the indices used to re-attach ChemeleonX atoms to ChimeraX atoms.
+    """Build the indices used to re-attach Chemur atoms to ChimeraX atoms.
 
     Returns ``(coord_index, name_index)``:
 
@@ -774,10 +784,10 @@ def _chimerax_atom_lookup(structure):
       when several share a chain/residue/atom name (the cause of the >10 Å lines on
       large assemblies like 6PUW).
     - ``name_index`` maps ``(chain_id, residue_id, residue_name, atom_name)`` ->
-      ChimeraX Atom, kept only as a fallback. Keys mirror ChemeleonX's parser: chain
+      ChimeraX Atom, kept only as a fallback. Keys mirror Chemur's parser: chain
       ``name or "_"`` and residue id ``f"{number}{insertion_code}"``.
 
-    ``atom.coord`` is the model-local frame ChemeleonX read from the saved mmCIF (the
+    ``atom.coord`` is the model-local frame Chemur read from the saved mmCIF (the
     same frame ``_attach_ring`` already compares ring centres in).
     """
     return _chimerax_atom_lookup_multi([structure])
@@ -806,11 +816,11 @@ def _chimerax_atom_lookup_multi(structures):
 
 
 def _resolve_atom(rec, coord_index, name_index):
-    """Resolve one ChemeleonX ``AtomRecord`` to a ChimeraX Atom.
+    """Resolve one Chemur ``AtomRecord`` to a ChimeraX Atom.
 
     Coordinate match first, name key as a fallback for floating-point boundary
     misses. Either way the result is accepted only if it actually sits on the
-    ChemeleonX atom (within ``_COORD_EPS``); otherwise we return ``None`` so the
+    Chemur atom (within ``_COORD_EPS``); otherwise we return ``None`` so the
     endpoint is treated as unresolved rather than drawn to the wrong atom.
     """
     atom = coord_index.get(_coord_key(rec.coord))
@@ -826,7 +836,7 @@ def _resolve_atom(rec, coord_index, name_index):
 def _choose_endpoints(inter, rec_by_id, id_to_atom, features_by_id):
     """Pick the two partner :class:`Endpoint`s for an interaction.
 
-    Prefers two atoms from different ChemeleonX components (the two interacting
+    Prefers two atoms from different Chemur components (the two interacting
     groups); falls back to the first two distinct mapped atoms. A side whose
     feature is an aromatic ring gets its ``ring_atoms`` attached so the line can
     terminate at the ring centroid.
@@ -1036,10 +1046,10 @@ def _format_value(value):
 def _log_summary(session, structure, counts, drawn, unresolved, filtered):
     logger = session.logger
     if not drawn:
-        logger.warning("ChemeleonX: no interactions to show for #%s." % structure.id_string)
+        logger.warning("Chemur: no interactions to show for #%s." % structure.id_string)
         return
     parts = ", ".join("%s: %d" % (k, counts[k]) for k in sorted(counts))
-    msg = "ChemeleonX drew %d interactions on #%s (%s)." % (drawn, structure.id_string, parts)
+    msg = "Chemur drew %d interactions on #%s (%s)." % (drawn, structure.id_string, parts)
     if filtered:
         msg += " %d hidden by filters." % filtered
     if unresolved:

@@ -1,4 +1,4 @@
-"""Qt GUI tool for ChemeleonX interaction prediction."""
+"""Qt GUI tool for Chemur interaction prediction."""
 
 from __future__ import annotations
 
@@ -13,9 +13,14 @@ from Qt.QtWidgets import (
     QLineEdit, QScrollArea, QWidget, QDoubleSpinBox, QFileDialog, QDialog,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView,
     QComboBox, QColorDialog, QSpinBox, QSlider, QListWidget, QListWidgetItem,
+    QSizePolicy,
 )
 
 from .colors import rgba_255
+from .widgets import (
+    ElidedLabel, NarrowScrollArea, ResizeNotifyWidget, flow_row, labelled,
+    repin_collapsible,
+)
 
 # Per-rule cutoffs we let the user edit, with display labels and spin-box setup.
 _CUTOFF_COLUMNS = [
@@ -37,8 +42,45 @@ _CHECKED = Qt.CheckState.Checked
 _UNCHECKED = Qt.CheckState.Unchecked
 _USER_ROLE = Qt.ItemDataRole.UserRole
 
+#: Width the docked panel asks for on first show. Everything is laid out to fit
+#: here without horizontal scrolling; the user can still drag it narrower (down
+#: to the 180 px floor in _build_ui) or wider.
+_PREFERRED_DOCK_WIDTH = 340
 
-class ChemeleonXTool(ToolInstance):
+
+def _shrinkable(widget):
+    """Let `widget` be narrower than its text so it cannot pin the panel width.
+
+    Ignored is the only horizontal policy that zeroes a widget's contribution to
+    the enclosing layout's minimum: qSmartMinSize() skips the width term for
+    Ignored, but Preferred still uses minimumSizeHint().width() -- which for a
+    QPushButton or QCheckBox is the full text width. Measured under ChimeraX's
+    Qt: QPushButton("Export interactions…") is 131 px under both Minimum and
+    Preferred, and 0 under Ignored.
+
+    Never use this on a widget inside a FlowLayout -- see flow_row().
+    """
+    widget.setSizePolicy(QSizePolicy.Policy.Ignored,
+                         widget.sizePolicy().verticalPolicy())
+    return widget
+
+
+def _mirror_text_to_tooltip(button):
+    """Keep `button`'s tooltip showing its full text, which may be clipped.
+
+    Used for ModelMenuButton, whose text is the model's "#id name". NEVER elide
+    or setText() one of those: ItemMenuButton.get_value() looks the model up by
+    button text (chimerax/ui/widgets/item_chooser.py), so a truncated string
+    silently breaks .value and therefore every analysis entry point.
+    """
+    def update(*_args):
+        button.setToolTip(button.text())
+    update()
+    button.value_changed.connect(update)
+    return button
+
+
+class ChemurTool(ToolInstance):
 
     SESSION_ENDURING = False
     SESSION_SAVE = False
@@ -46,7 +88,7 @@ class ChemeleonXTool(ToolInstance):
 
     def __init__(self, session, tool_name):
         super().__init__(session, tool_name)
-        self.display_name = "ChemeleonX"
+        self.display_name = "Chemur"
         self.tool_window = MainToolWindow(self)
         self._rows = []
         self._ligand_report = []       # [LigandProtonation] from the last analysis
@@ -65,13 +107,44 @@ class ChemeleonXTool(ToolInstance):
         self._traj_table_shown = 0
         self._coordset_handler = None  # 'changes' handler tracking coordset playback
         self._suppress_coordset_sync = False
-        self._compare_result = None    # DifferenceResult from the last comparison
-        self._compare_dialog = None
         self._pose_comparison = None   # PoseComparison from the last pose run
         self._pose_dialog = None
         self._pose_3d_groups = {}      # pose_index -> global pseudobond group name
+        self._panels = []              # [CollapsiblePanel] needing height re-pinning
+        self._repinning = False
         self._build_ui()
         self.tool_window.manage("side")
+        self._set_initial_dock_width(_PREFERRED_DOCK_WIDTH)
+
+    def _set_initial_dock_width(self, width):
+        """Open the docked panel at a sane width instead of Qt's sizeHint cap.
+
+        manage() sizes a docked tool from ui_area.sizeHint().width();
+        NarrowScrollArea already reports _PREFERRED_DOCK_WIDTH there, and this
+        pins it against QMainWindow's dock layout rounding it up. Skipped when
+        the user has saved a tool position, so an explicit choice always wins.
+        Deferred because the dock is not laid out until after manage() returns.
+        """
+        try:
+            saved = self.session.ui.settings.tool_positions["windows"]
+        except Exception:
+            saved = {}
+        if self.tool_name in saved:
+            return
+
+        def apply():
+            try:
+                # Private API, documented as "emergency access" -- never let it
+                # break tool startup.
+                dock = self.tool_window._dock_widget
+                if dock is not None and not dock.isFloating():
+                    self.session.ui.main_window.resizeDocks(
+                        [dock], [width], Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+
+        from Qt.QtCore import QTimer
+        QTimer.singleShot(0, apply)
 
     def delete(self):
         self._remove_coordset_handler()
@@ -100,45 +173,50 @@ class ChemeleonXTool(ToolInstance):
         # blocks resizing the main ChimeraX window. Over-wide/tall content scrolls.
         outer = QVBoxLayout(parent)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll_host = QScrollArea()
+        # NarrowScrollArea, not QScrollArea: QScrollArea.sizeHint() is its
+        # content's sizeHint bounded to 36 x font height (~540 px), and that is
+        # the number ChimeraX reads to size a docked tool.
+        scroll_host = NarrowScrollArea()
         scroll_host.setWidgetResizable(True)
         scroll_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_host.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_host.setMinimumWidth(180)
         outer.addWidget(scroll_host)
 
-        content = QWidget()
+        # Expanded CollapsiblePanels pin their height when toggled, from a
+        # sizeHint that ignores heightForWidth; re-pin them whenever the dock is
+        # resized so wrapped rows/labels neither clip nor over-reserve.
+        content = ResizeNotifyWidget(self._repin_panels)
         scroll_host.setWidget(content)
         layout = QVBoxLayout()
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(6)
         content.setLayout(layout)
 
         chooser = QHBoxLayout()
         chooser.addWidget(QLabel("Structure:"))
         self._model_button = ModelMenuButton(self.session, class_filter=AtomicStructure)
+        _shrinkable(_mirror_text_to_tooltip(self._model_button))
         chooser.addWidget(self._model_button, 1)
         layout.addLayout(chooser)
 
-        # Primary options (always visible).
-        opts = QHBoxLayout()
+        # Primary options (always visible). A flow row so these wrap onto extra
+        # lines in a narrow dock instead of setting a ~520 px horizontal floor.
         self._addh_cb = QCheckBox("Add hydrogens")
         self._addh_cb.setChecked(True)
         self._addh_cb.setToolTip("Run 'addh' first so H-bonds can be detected.")
-        opts.addWidget(self._addh_cb)
         self._protonate_cb = QCheckBox("Protonate ligands")
         self._protonate_cb.setToolTip(
             "Use Dimorphite-DL to protonate ligand SMILES at the pH set in "
             "Advanced options.")
-        opts.addWidget(self._protonate_cb)
         self._selected_cb = QCheckBox("Selected atoms only")
         self._selected_cb.setToolTip("Keep only interactions with at least one selected partner.")
-        opts.addWidget(self._selected_cb)
         self._skip_bio_cb = QCheckBox("Skip biopolymer-internal")
         self._skip_bio_cb.setToolTip("Drop interactions internal to a biopolymer.")
-        opts.addWidget(self._skip_bio_cb)
-        opts.addStretch(1)
-        layout.addLayout(opts)
+        layout.addWidget(flow_row(self._addh_cb, self._protonate_cb,
+                                  self._selected_cb, self._skip_bio_cb))
 
-        layout.addWidget(self._build_advanced_panel())
+        self._add_panel(layout, self._build_advanced_panel())
 
         self._analyze_btn = QPushButton("Analyze interactions")
         self._analyze_btn.clicked.connect(self._analyze)
@@ -169,14 +247,13 @@ class ChemeleonXTool(ToolInstance):
         self._legend_area.setWidget(self._legend_holder)
         layout.addWidget(self._legend_area)
 
-        # Show/hide-all + export controls.
-        controls = QHBoxLayout()
+        # Show/hide-all + export controls, split across two flow rows. As one
+        # QHBoxLayout these eight widgets set a ~800 px floor, which is what
+        # pushed the export buttons off-screen in a docked panel.
         show_all = QPushButton("Show all")
         show_all.clicked.connect(lambda: self._set_all_visible(True))
-        controls.addWidget(show_all)
         hide_all = QPushButton("Hide all")
         hide_all.clicked.connect(lambda: self._set_all_visible(False))
-        controls.addWidget(hide_all)
 
         self._interchain_cb = QCheckBox("Inter-chain only")
         self._interchain_cb.setToolTip(
@@ -185,10 +262,8 @@ class ChemeleonXTool(ToolInstance):
             "Note: a type whose contacts are all intra-chain shows its legend "
             "checkbox unticked while this is on.")
         self._interchain_cb.toggled.connect(self._on_interchain_toggled)
-        controls.addWidget(self._interchain_cb)
-        controls.addStretch(1)
+        layout.addWidget(flow_row(show_all, hide_all, self._interchain_cb))
 
-        controls.addWidget(QLabel("Export:"))
         self._export_scope = QComboBox()
         # (label, scope key). Scope decides which rows _export_interactions writes.
         for label, key in (
@@ -201,20 +276,23 @@ class ChemeleonXTool(ToolInstance):
             "Which interactions to export: all, the rows selected in the results "
             "tree, or those touching atoms selected in the 3D view.")
         self._export_scope.setEnabled(False)
-        controls.addWidget(self._export_scope)
-        self._export_interactions_btn = QPushButton("Export interactions…")
+        # No "Export:" label: the combo sits between two Export buttons and its
+        # own tooltip says what it scopes. Worth ~55 px on this row.
+        # Deliberately NOT _shrinkable(): it goes into a flow_row below, and an
+        # Ignored horizontal policy makes QWidgetItem::sizeHint() report width 0,
+        # which laid the combo out 0 px wide instead of 166.
+        self._export_interactions_btn = QPushButton("Export data…")
         self._export_interactions_btn.setToolTip(
             "Export interaction data to a JSON or CSV file.")
         self._export_interactions_btn.setEnabled(False)
         self._export_interactions_btn.clicked.connect(self._export_interactions)
-        controls.addWidget(self._export_interactions_btn)
 
-        self._export_btn = QPushButton("Export 2D diagram…")
+        self._export_btn = QPushButton("Export 2D…")
         self._export_btn.setToolTip("Export a 2D schematic of the selected residues' interactions.")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._export_diagram)
-        controls.addWidget(self._export_btn)
-        layout.addLayout(controls)
+        layout.addWidget(flow_row(self._export_scope,
+                                  self._export_interactions_btn, self._export_btn))
 
         # Free-text keyword filter for the results tree (list-only; does not
         # touch pseudobond display or the legend). Multiple whitespace-separated
@@ -231,8 +309,15 @@ class ChemeleonXTool(ToolInstance):
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(4)
-        self._tree.setHeaderLabels(["Type / partner", "Distance (Å)", "Angle (°)", "Offset (Å)"])
+        # Short headers with the units in tooltips: spelled out, "Distance (Å)"
+        # alone eats 82 px of a 300 px panel and squeezes column 0 -- the actual
+        # content -- down to 69 px, forcing the tree's own horizontal scrollbar.
+        self._tree.setHeaderLabels(["Type / partner", "Dist", "Angle", "Offset"])
+        for col, tip in ((1, "Distance (Å)"), (2, "Angle (°)"), (3, "Offset (Å)")):
+            self._tree.headerItem().setToolTip(col, tip)
         header = self._tree.header()
+        # Off, or the last column absorbs spare width instead of column 0.
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in (1, 2, 3):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
@@ -244,97 +329,95 @@ class ChemeleonXTool(ToolInstance):
         self._tree.setMinimumHeight(80)
         layout.addWidget(self._tree, 1)
 
-        self._status = QLabel("")
+        # Elided, not plain: this is fed full export paths and exception strings,
+        # which would otherwise widen the panel's minimum at runtime.
+        self._status = ElidedLabel("")
         layout.addWidget(self._status)
 
-        layout.addWidget(self._build_trajectory_panel())
-        layout.addWidget(self._build_compare_panel())
-        layout.addWidget(self._build_pose_panel())
+        self._add_panel(layout, self._build_trajectory_panel())
+        self._add_panel(layout, self._build_pose_panel())
 
-    def _build_compare_panel(self):
-        """Collapsible 'Compare models' section: diff two structures' interactions."""
-        from chimerax.atomic import AtomicStructure
-        from chimerax.ui.widgets import ModelMenuButton
+    def _add_panel(self, layout, panel):
+        """Add a CollapsiblePanel and keep its pinned height honest."""
+        # ChimeraX forces spacing 0 on a panel's content layout on macOS
+        # (chimerax/ui/widgets/composite.py), which leaves every control inside a
+        # section flush against its neighbours. Match the main column instead.
+        panel.content_area.layout().setSpacing(6)
+        self._panels.append(panel)
+        # Fires after CollapsiblePanel's own handler, so the panel has already
+        # toggled and just needs its pinned height corrected.
+        panel.toggle_button.clicked.connect(self._repin_panels)
+        layout.addWidget(panel)
 
-        panel = CollapsiblePanel(self.tool_window.ui_area, title="Compare models")
-        content = panel.content_area.layout()
+    def _repin_panels(self):
+        """Re-pin expanded collapsible sections to the height they need now.
 
-        content.addWidget(QLabel(
-            "Compare predicted interactions between two structures of the same "
-            "system. Residues are matched by sequence alignment (MatchMaker), "
-            "which also superimposes model B onto model A."))
+        CollapsiblePanel pins its content height from a sizeHint that ignores
+        heightForWidth, so a word-wrapped label or a wrapped flow row is clipped
+        once the dock narrows. Deferred to the next event-loop turn because on a
+        resize the children have not been re-laid-out yet, and guarded because
+        re-pinning resizes the content widget that triggered us.
+        """
+        if self._repinning:
+            return
+        self._repinning = True
 
-        a_row = QHBoxLayout()
-        a_row.addWidget(QLabel("Model A (reference):"))
-        self._compare_a = ModelMenuButton(self.session, class_filter=AtomicStructure)
-        a_row.addWidget(self._compare_a, 1)
-        content.addLayout(a_row)
+        def apply():
+            try:
+                for panel in self._panels:
+                    repin_collapsible(panel)
+            finally:
+                self._repinning = False
 
-        b_row = QHBoxLayout()
-        b_row.addWidget(QLabel("Model B:"))
-        self._compare_b = ModelMenuButton(self.session, class_filter=AtomicStructure)
-        b_row.addWidget(self._compare_b, 1)
-        content.addLayout(b_row)
-
-        self._compare_btn = QPushButton("Analyze & compare")
-        self._compare_btn.setToolTip(
-            "Run ChemeleonX on both models (using the options above) and compare "
-            "interactions over their common residues.")
-        self._compare_btn.clicked.connect(self._analyze_compare)
-        content.addWidget(self._compare_btn)
-
-        self._compare_status = QLabel("")
-        self._compare_status.setWordWrap(True)
-        content.addWidget(self._compare_status)
-
-        self._compare_show_btn = QPushButton("Show difference plot…")
-        self._compare_show_btn.setEnabled(False)
-        self._compare_show_btn.clicked.connect(self._open_compare_dialog)
-        content.addWidget(self._compare_show_btn)
-
-        return panel
+        from Qt.QtCore import QTimer
+        QTimer.singleShot(0, apply)
 
     def _build_pose_panel(self):
         """Collapsible 'Compare docked poses' section: MSA-like pose comparison."""
         from chimerax.atomic import AtomicStructure
         from chimerax.ui.widgets import ModelMenuButton
 
-        panel = CollapsiblePanel(self.tool_window.ui_area, title="Compare docked poses")
+        panel = CollapsiblePanel(self.tool_window.ui_area, title="Compare docked poses",
+                                 margins=(12, 0, 0, 0))
         content = panel.content_area.layout()
 
-        content.addWidget(QLabel(
+        # ~1800 px as a single unwrapped line, and pinned the tool that wide even
+        # while this panel was collapsed -- the single biggest cause of the
+        # permanent horizontal scrollbar. Full text on hover.
+        intro = QLabel("Compare docked ligand poses residue-by-residue.")
+        intro.setWordWrap(True)
+        intro.setToolTip(
             "Analyse several docked ligand poses (each a separate model) against one "
             "receptor, then compare their interaction patterns residue-by-residue in "
             "an MSA-like figure. Ligand-only poses are merged with the receptor; poses "
             "that already contain the protein are analysed as-is. Targets small-molecule "
-            "ligands."))
+            "ligands.")
+        content.addWidget(intro)
 
         r_row = QHBoxLayout()
         r_row.addWidget(QLabel("Receptor:"))
         self._pose_receptor = ModelMenuButton(self.session, class_filter=AtomicStructure)
+        _shrinkable(_mirror_text_to_tooltip(self._pose_receptor))
         self._pose_receptor.value_changed.connect(self._refresh_pose_list)
         r_row.addWidget(self._pose_receptor, 1)
         content.addLayout(r_row)
 
-        content.addWidget(QLabel("Poses (tick the docked-ligand models):"))
+        poses_label = QLabel("Poses (tick the docked-ligand models):")
+        poses_label.setWordWrap(True)
+        content.addWidget(poses_label)
         self._pose_list = QListWidget()
         self._pose_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._pose_list.setFixedHeight(120)
         content.addWidget(self._pose_list)
 
-        btn_row = QHBoxLayout()
-        refresh = QPushButton("Refresh list")
+        refresh = QPushButton("Refresh")
         refresh.setToolTip("Re-read the open models (other than the receptor).")
         refresh.clicked.connect(self._refresh_pose_list)
-        btn_row.addWidget(refresh)
         sel_all = QPushButton("Select all")
         sel_all.clicked.connect(lambda: self._set_pose_checks(True))
-        btn_row.addWidget(sel_all)
         sel_none = QPushButton("None")
         sel_none.clicked.connect(lambda: self._set_pose_checks(False))
-        btn_row.addWidget(sel_none)
-        btn_row.addStretch(1)
-        content.addLayout(btn_row)
+        content.addWidget(flow_row(refresh, sel_all, sel_none))
 
         ctx_row = QHBoxLayout()
         ctx_row.addWidget(QLabel("Sequence context ±"))
@@ -349,13 +432,12 @@ class ChemeleonXTool(ToolInstance):
 
         self._pose_btn = QPushButton("Analyze poses")
         self._pose_btn.setToolTip(
-            "Run ChemeleonX on each ticked pose against the receptor and build the "
+            "Run Chemur on each ticked pose against the receptor and build the "
             "comparison figure (using the analysis options above).")
         self._pose_btn.clicked.connect(self._analyze_poses)
         content.addWidget(self._pose_btn)
 
-        self._pose_status = QLabel("")
-        self._pose_status.setWordWrap(True)
+        self._pose_status = ElidedLabel("")
         content.addWidget(self._pose_status)
 
         self._pose_show_btn = QPushButton("Show comparison figure…")
@@ -368,48 +450,51 @@ class ChemeleonXTool(ToolInstance):
 
     def _build_trajectory_panel(self):
         """Collapsible 'Trajectory' section: per-frame analysis + plots."""
-        panel = CollapsiblePanel(self.tool_window.ui_area, title="Trajectory (MD)")
+        panel = CollapsiblePanel(self.tool_window.ui_area, title="Trajectory (MD)",
+                                 margins=(12, 0, 0, 0))
         content = panel.content_area.layout()
 
-        # Frame range / options row.
-        opts = QGridLayout()
-        opts.addWidget(QLabel("Start"), 0, 0)
+        # Frame range / options. A flow row of label+control pairs rather than a
+        # 6-column QGridLayout, whose columns are additive (~435 px floor);
+        # labelled() keeps each label glued to its spin box across a wrap.
         self._traj_start = QSpinBox(); self._traj_start.setRange(0, 10_000_000)
-        opts.addWidget(self._traj_start, 0, 1)
-        opts.addWidget(QLabel("Stop"), 0, 2)
         self._traj_stop = QSpinBox(); self._traj_stop.setRange(0, 10_000_000)
         self._traj_stop.setSpecialValueText("end"); self._traj_stop.setValue(0)
         self._traj_stop.setToolTip("Stop frame (exclusive). 'end' uses all frames.")
-        opts.addWidget(self._traj_stop, 0, 3)
-        opts.addWidget(QLabel("Stride"), 0, 4)
         self._traj_stride = QSpinBox(); self._traj_stride.setRange(1, 1_000_000)
         self._traj_stride.setValue(1)
-        opts.addWidget(self._traj_stride, 0, 5)
-        opts.addWidget(QLabel("Processes"), 1, 0)
         self._traj_processes = QSpinBox(); self._traj_processes.setRange(1, 256)
         self._traj_processes.setValue(1)
         self._traj_processes.setToolTip("Worker processes for parallel per-frame analysis.")
-        opts.addWidget(self._traj_processes, 1, 1)
         self._traj_excl_solvent = QCheckBox("Exclude solvent")
         self._traj_excl_solvent.setChecked(True)
-        opts.addWidget(self._traj_excl_solvent, 1, 2, 1, 2)
         self._traj_excl_ions = QCheckBox("Exclude ions")
         self._traj_excl_ions.setChecked(True)
-        opts.addWidget(self._traj_excl_ions, 1, 4, 1, 2)
-        content.addLayout(opts)
+        content.addWidget(flow_row(
+            labelled("Start", self._traj_start),
+            labelled("Stop", self._traj_stop),
+            labelled("Stride", self._traj_stride),
+            labelled("Processes", self._traj_processes),
+            self._traj_excl_solvent, self._traj_excl_ions))
 
         self._traj_analyze_btn = QPushButton("Analyze trajectory")
         self._traj_analyze_btn.clicked.connect(self._analyze_trajectory)
         content.addWidget(self._traj_analyze_btn)
 
-        self._traj_status = QLabel("")
+        self._traj_status = ElidedLabel("")
         content.addWidget(self._traj_status)
 
         # Occupancy table.
         self._traj_table = QTreeWidget()
         self._traj_table.setColumnCount(4)
         self._traj_table.setHeaderLabels(["Interaction", "Type", "Occupancy", "Mean dist (Å)"])
-        self._traj_table.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        traj_header = self._traj_table.header()
+        # As with the results tree: let column 0, not "Mean dist (Å)", take the
+        # spare width.
+        traj_header.setStretchLastSection(False)
+        traj_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3):
+            traj_header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self._traj_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._traj_table.setMinimumHeight(120)
         self._traj_table.itemSelectionChanged.connect(self._on_occupancy_selected)
@@ -428,7 +513,9 @@ class ChemeleonXTool(ToolInstance):
 
         # Live per-frame interactions: draw the current frame's interactions as
         # pseudobonds in 3D and feed them to the standard interactions section.
-        self._traj_live_cb = QCheckBox("Show frame interactions (3D + list)")
+        # "(3D + list)" lives in the tooltip; spelled out it was the widest single
+        # control left in the panel.
+        self._traj_live_cb = QCheckBox("Show frame interactions")
         self._traj_live_cb.setToolTip(
             "Draw the current frame's interactions as pseudobonds and list them in the "
             "main interactions panel. Updates when you release the frame slider.")
@@ -454,22 +541,20 @@ class ChemeleonXTool(ToolInstance):
         self._traj_plots = None        # TrajectoryPlotPanel inside the dialog
         self._traj_plots_dialog = None
 
-        save_row = QHBoxLayout()
-        save_row.addStretch(1)
         self._traj_show_plots_btn = QPushButton("Show plots…")
         self._traj_show_plots_btn.setEnabled(False)
         self._traj_show_plots_btn.clicked.connect(self._open_traj_plots)
-        save_row.addWidget(self._traj_show_plots_btn)
         self._traj_export_btn = QPushButton("Export CSV…")
         self._traj_export_btn.setEnabled(False)
         self._traj_export_btn.clicked.connect(self._export_trajectory)
-        save_row.addWidget(self._traj_export_btn)
-        content.addLayout(save_row)
+        content.addWidget(flow_row(self._traj_show_plots_btn, self._traj_export_btn))
 
         return panel
 
     def _build_advanced_panel(self):
-        panel = CollapsiblePanel(self.tool_window.ui_area, title="Advanced options")
+        # margins: the default 30 px title indent is a tenth of a 300 px panel.
+        panel = CollapsiblePanel(self.tool_window.ui_area, title="Advanced options",
+                                 margins=(12, 0, 0, 0))
         content = panel.content_area.layout()
 
         ph_row = QHBoxLayout()
@@ -485,7 +570,9 @@ class ChemeleonXTool(ToolInstance):
         ph_row.addStretch(1)
         content.addLayout(ph_row)
 
-        content.addWidget(QLabel("Geometry cutoffs (edited values are applied):"))
+        cutoffs_label = QLabel("Geometry cutoffs (edited values are applied):")
+        cutoffs_label.setWordWrap(True)
+        content.addWidget(cutoffs_label)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFixedHeight(180)
@@ -528,7 +615,7 @@ class ChemeleonXTool(ToolInstance):
 
     def _default_rules(self):
         try:
-            from chemeleonx.profile import load_profile
+            from chemur.profile import load_profile
             return load_profile("default").get("rules", {})
         except Exception:
             return {}
@@ -549,7 +636,7 @@ class ChemeleonXTool(ToolInstance):
     def _analyze(self):
         structure = self._model_button.value
         if structure is None:
-            self.session.logger.error("ChemeleonX: choose a structure first.")
+            self.session.logger.error("Chemur: choose a structure first.")
             return
         from .runner import run_interactions
 
@@ -593,7 +680,7 @@ class ChemeleonXTool(ToolInstance):
     def _analyze_trajectory(self):
         structure = self._model_button.value
         if structure is None:
-            self.session.logger.error("ChemeleonX: choose a structure first.")
+            self.session.logger.error("Chemur: choose a structure first.")
             return
         if structure.num_coordsets < 2:
             self._traj_status.setText(
@@ -854,7 +941,7 @@ class ChemeleonXTool(ToolInstance):
             return
         path, _ = QFileDialog.getSaveFileName(
             self.tool_window.ui_area, "Export trajectory interactions",
-            "chemeleonx_trajectory.csv",
+            "chemur_trajectory.csv",
             "CSV (*.csv);;JSON (*.json)")
         if not path:
             return
@@ -862,79 +949,7 @@ class ChemeleonXTool(ToolInstance):
             self._traj_run.result.to_json(path)
         else:
             self._traj_run.result.to_csv(path)
-        self.session.logger.info("ChemeleonX: exported trajectory data to %s" % path)
-
-    # ----- model comparison ------------------------------------------------
-
-    def _analyze_compare(self):
-        struct_a = self._compare_a.value
-        struct_b = self._compare_b.value
-        if struct_a is None or struct_b is None:
-            self._compare_status.setText("Choose Model A and Model B first.")
-            return
-        if struct_a is struct_b:
-            self._compare_status.setText("Choose two different models to compare.")
-            return
-        from . import compare
-
-        run_kwargs = dict(
-            protonate=self._protonate_cb.isChecked(),
-            protonate_ph=self._ph_spin.value(),
-            ligand_smiles=self._ligand_smiles_overrides or None,
-            add_hydrogens=self._addh_cb.isChecked(),
-            rule_overrides=self._collect_rule_overrides(),
-            selected_only=False,
-            skip_biopolymer_internal=self._skip_bio_cb.isChecked(),
-        )
-        self._compare_status.setText("Aligning and analyzing both models…")
-        self._compare_btn.setEnabled(False)
-        try:
-            result = compare.compute_difference(
-                self.session, struct_a, struct_b, run_kwargs,
-                name_a="#%s" % struct_a.id_string,
-                name_b="#%s" % struct_b.id_string)
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._compare_status.setText("Error: %s" % e)
-            return
-        finally:
-            self._compare_btn.setEnabled(True)
-
-        self._compare_result = result
-        self._compare_status.setText(
-            "%d common residues (%d only in A, %d only in B); "
-            "%d interactions differ. Model B superimposed on A."
-            % (result.n_common, result.n_only_a, result.n_only_b,
-               result.n_changed))
-        self._compare_show_btn.setEnabled(True)
-        self._open_compare_dialog()
-
-    def _ensure_compare_dialog(self):
-        if self._compare_dialog is None:
-            from .difference_plot import DifferenceDialog
-            self._compare_dialog = DifferenceDialog(
-                self.tool_window.ui_area, self.session,
-                on_row_selected=self._on_compare_row_selected)
-
-    def _open_compare_dialog(self):
-        if self._compare_result is None:
-            return
-        self._ensure_compare_dialog()
-        self._compare_dialog.set_result(self._compare_result)
-        self._compare_dialog.show()
-        self._compare_dialog.raise_()
-        self._compare_dialog.activateWindow()
-
-    def _on_compare_row_selected(self, entry):
-        """Select the clicked interaction's atoms in 3D (from whichever model has it)."""
-        row = entry.get("row_a") or entry.get("row_b")
-        if row is None:
-            return
-        from chimerax.atomic import Atoms
-        atoms = [ep.atom for ep in (row.endpoint1, row.endpoint2) if ep.atom is not None]
-        self.session.selection.clear()
-        if atoms:
-            Atoms(atoms).selected = True
+        self.session.logger.info("Chemur: exported trajectory data to %s" % path)
 
     # ----- docked-pose comparison ------------------------------------------
 
@@ -1013,12 +1028,17 @@ class ChemeleonXTool(ToolInstance):
         has_data = bool(comparison.rows) and bool(comparison.columns)
         if not has_data:
             self._pose_show_btn.setEnabled(False)
-            msg = "No protein-ligand interactions found for the selected poses."
+            # Short on screen, actionable on hover: the status label is a single
+            # elided line, so the "what to do about it" half would be cut off.
+            msg = "No protein-ligand interactions found."
+            tip = "No protein-ligand interactions found for the selected poses."
             if comparison.n_untemplated:
-                msg += (" %d pose ligand(s) could not be templated — try enabling "
+                msg += " %d ligand(s) not templated." % comparison.n_untemplated
+                tip += (" %d pose ligand(s) could not be templated — try enabling "
                         "'Protonate ligands', or supply a ligand SMILES."
                         % comparison.n_untemplated)
             self._pose_status.setText(msg)
+            self._pose_status.setToolTip(tip)
             return
         n_unmapped = sum(1 for r in comparison.rows if not r.fully_mapped)
         msg = "%d poses × %d residues; %d interaction type(s)." % (
@@ -1069,7 +1089,7 @@ class ChemeleonXTool(ToolInstance):
         if comparison is None or not (0 <= pose_index < len(comparison.rows)):
             return
         pose_row = comparison.rows[pose_index]
-        group_name = "ChemeleonX pose %s" % pose_row.name
+        group_name = "Chemur pose %s" % pose_row.name
         if show:
             # All of this pose's protein-ligand rows live across its cell_rows.
             rows = [row for (idx, _key), rows in comparison.cell_rows.items()
@@ -1078,11 +1098,11 @@ class ChemeleonXTool(ToolInstance):
                 draw_pose_rows(self.session, rows, group_name)
                 self._pose_3d_groups[pose_index] = group_name
                 self.session.logger.info(
-                    "ChemeleonX: drew %d interactions for %s in 3D."
+                    "Chemur: drew %d interactions for %s in 3D."
                     % (len(rows), pose_row.name))
             except Exception as e:
                 self.session.logger.warning(
-                    "ChemeleonX: could not draw %s in 3D (%s)" % (pose_row.name, e))
+                    "Chemur: could not draw %s in 3D (%s)" % (pose_row.name, e))
         else:
             clear_pose_group(self.session, group_name)
             self._pose_3d_groups.pop(pose_index, None)
@@ -1413,16 +1433,16 @@ class ChemeleonXTool(ToolInstance):
 
     def _export_diagram(self):
         if not self._rows:
-            self.session.logger.error("ChemeleonX: run an analysis first.")
+            self.session.logger.error("Chemur: run an analysis first.")
             return
         structure = self._model_button.value
         if structure is None:
-            self.session.logger.error("ChemeleonX: choose a structure first.")
+            self.session.logger.error("Chemur: choose a structure first.")
             return
         selected_residues = {a.residue for a in structure.atoms if a.selected}
         if not selected_residues:
             self.session.logger.error(
-                "ChemeleonX: select a ligand or residue(s) first, then Export.")
+                "Chemur: select a ligand or residue(s) first, then Export.")
             self._status.setText("Select a ligand or residue(s) first.")
             return
 
@@ -1461,19 +1481,19 @@ class ChemeleonXTool(ToolInstance):
 
     def _export_interactions(self):
         if not self._rows:
-            self.session.logger.error("ChemeleonX: run an analysis first.")
+            self.session.logger.error("Chemur: run an analysis first.")
             return
         rows = self._rows_for_scope()
         if not rows:
             msg = ("No interactions in the chosen scope; select some rows or "
                    "atoms first, or switch the scope to 'All interactions'.")
-            self.session.logger.error("ChemeleonX: " + msg)
+            self.session.logger.error("Chemur: " + msg)
             self._status.setText(msg)
             return
 
         path, flt = QFileDialog.getSaveFileName(
             self.tool_window.ui_area, "Export interactions",
-            "chemeleonx_interactions.json", "JSON (*.json);;CSV (*.csv)")
+            "chemur_interactions.json", "JSON (*.json);;CSV (*.csv)")
         if not path:
             return
 
@@ -1489,7 +1509,7 @@ class ChemeleonXTool(ToolInstance):
             self._status.setText("Export error: %s" % e)
             return
         self.session.logger.info(
-            "ChemeleonX exported %d interactions: %s" % (len(rows), path))
+            "Chemur exported %d interactions: %s" % (len(rows), path))
         self._status.setText("Exported %d interactions to %s" % (len(rows), path))
 
 
@@ -1503,7 +1523,7 @@ class TrajectoryPlotsDialog(QDialog):
 
     def __init__(self, parent, session, on_key_selected=None):
         super().__init__(parent)
-        self.setWindowTitle("ChemeleonX trajectory plots")
+        self.setWindowTitle("Chemur trajectory plots")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self._session = session
 
@@ -1527,11 +1547,11 @@ class TrajectoryPlotsDialog(QDialog):
 
     def _save(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save plot", "chemeleonx_trajectory.png",
+            self, "Save plot", "chemur_trajectory.png",
             "Images (*.png *.svg *.pdf)")
         if path:
             self.panel.save_current(path)
-            self._session.logger.info("ChemeleonX: saved plot to %s" % path)
+            self._session.logger.info("Chemur: saved plot to %s" % path)
 
 
 class DiagramPreviewDialog(QDialog):
@@ -1543,7 +1563,7 @@ class DiagramPreviewDialog(QDialog):
 
     def __init__(self, parent, session, scene, title=None):
         super().__init__(parent)
-        self.setWindowTitle("ChemeleonX interaction diagram")
+        self.setWindowTitle("Chemur interaction diagram")
         self._session = session
         self._scene = scene
         self._edges_by_id = {id(e): e for e in scene.edges}
@@ -1669,7 +1689,7 @@ class DiagramPreviewDialog(QDialog):
 
     def _save(self):
         path, _flt = QFileDialog.getSaveFileName(
-            self, "Save interaction diagram", "chemeleonx_interactions.png",
+            self, "Save interaction diagram", "chemur_interactions.png",
             "PNG image (*.png);;SVG image (*.svg);;PDF document (*.pdf)")
         if not path:
             return
@@ -1678,7 +1698,7 @@ class DiagramPreviewDialog(QDialog):
         except Exception:
             self._session.logger.report_exception()
             return
-        self._session.logger.info("ChemeleonX saved interaction diagram: %s" % path)
+        self._session.logger.info("Chemur saved interaction diagram: %s" % path)
 
 
 class LigandProtonationDialog(QDialog):
@@ -1694,7 +1714,7 @@ class LigandProtonationDialog(QDialog):
 
     def __init__(self, parent, rerun_callback):
         super().__init__(parent)
-        self.setWindowTitle("ChemeleonX protonation report")
+        self.setWindowTitle("Chemur protonation report")
         self._rerun_callback = rerun_callback
         self._rows = []  # [(name, original_smiles, QLineEdit)]
 

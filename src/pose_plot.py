@@ -426,7 +426,7 @@ class PoseMsaDialog(QDialog):
 
     def __init__(self, parent, session, on_cell_selected=None, on_pose_show_3d=None):
         super().__init__(parent)
-        self.setWindowTitle("ChemeleonX pose comparison")
+        self.setWindowTitle("Chemur pose comparison")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self._session = session
 
@@ -453,11 +453,11 @@ class PoseMsaDialog(QDialog):
 
     def _save(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save plot", "chemeleonx_pose_comparison.png",
+            self, "Save plot", "chemur_pose_comparison.png",
             "Images (*.png *.svg *.pdf)")
         if path:
             self.panel.save_current(path)
-            self._session.logger.info("ChemeleonX: saved pose comparison to %s" % path)
+            self._session.logger.info("Chemur: saved pose comparison to %s" % path)
 
 
 def _clear_layout(layout):

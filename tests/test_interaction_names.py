@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 profile = pytest.importorskip(
-    "chemeleonx.profile",
-    reason="engine not installed; `pip install chemeleonx` to enable this guard",
+    "chemur.profile",
+    reason="engine not installed; `pip install chemur` to enable this guard",
 )
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
@@ -24,7 +24,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 
 def _colors():
     spec = importlib.util.spec_from_file_location(
-        "chemeleonx_chimerax_colors", _SRC / "colors.py"
+        "chemur_chimerax_colors", _SRC / "colors.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

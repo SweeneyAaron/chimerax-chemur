@@ -1,8 +1,8 @@
-"""Pseudobond styling per ChemeleonX interaction type.
+"""Pseudobond styling per Chemur interaction type.
 
 Colors are RGBA tuples (0-255); radius is in Angstroms. The keys are the
-``interaction_type`` strings emitted by ChemeleonX (the rule names in
-``chemeleonx/profiles/default.yaml``).
+``interaction_type`` strings emitted by Chemur (the rule names in
+``chemur/profiles/default.yaml``).
 """
 
 from __future__ import annotations
@@ -25,6 +25,19 @@ INTERACTION_STYLE = {
     "halogen_pi":         {"color": (120, 230, 200, 255), "radius": 0.12, "dashes": 8},
     "ch_pi":              {"color": (200, 200, 120, 255), "radius": 0.10, "dashes": 8},
     "hydrophobic":        {"color": (210, 210, 210, 255), "radius": 0.08, "dashes": 10},
+    # Types the chemur engine emits that ChemeleonX did not. Styled to the same
+    # conventions as the rest of the table: sigma-hole donors get radius 0.14 /
+    # 4 dashes like halogen_bond, their pi variants a lighter tint at 0.12 / 8,
+    # and weak dispersive contacts a small radius with many dashes.
+    "chalcogen_bond":     {"color": (230, 100, 200, 255), "radius": 0.14, "dashes": 4},
+    "chalcogen_pi":       {"color": (240, 170, 225, 255), "radius": 0.12, "dashes": 8},
+    "tetrel_bond":        {"color": (190, 150, 90, 255),  "radius": 0.14, "dashes": 4},
+    "n_pi_star":          {"color": (120, 110, 210, 255), "radius": 0.10, "dashes": 8},
+    "anion_aromatic_edge": {"color": (60, 210, 255, 255), "radius": 0.12, "dashes": 8},
+    "aliphatic_pi_stack": {"color": (160, 205, 110, 255), "radius": 0.12, "dashes": 8},
+    # Disabled in the engine's default profile, but styled so enabling it in a
+    # custom profile does not fall through to grey.
+    "aliphatic_stack":    {"color": (190, 215, 160, 255), "radius": 0.10, "dashes": 10},
 }
 
 

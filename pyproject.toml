@@ -3,11 +3,13 @@ requires = ["ChimeraX-BundleBuilder"]
 build-backend = "chimerax.bundle_builder.cx_pep517"
 
 [project]
-name = "ChimeraX-ChemeleonX"
-# 0.2, not 0.1: the rename makes this a different distribution to pip, so this is
-# not an in-place upgrade of ChimeraX-ProPLID 0.1 -- uninstall that one first.
-version = "0.2"
-description = "Predict and visualize biomolecular interactions with ChemeleonX"
+name = "ChimeraX-Chemur"
+# Versioning restarts at 0.1.0 to line up with the chemur engine. Renaming the
+# distribution makes this a different package to pip, so it does NOT upgrade
+# ChimeraX-ChemeleonX 0.2 in place -- run `toolshed uninstall ChimeraX-ChemeleonX`
+# first (see README).
+version = "0.1.0"
+description = "Predict and visualize biomolecular interactions with Chemur"
 authors = [{ name = "Aaron Sweeney", email = "ucbtasw@ucl.ac.uk" }]
 requires-python = ">=3.10"
 # ChimeraX's `toolshed install` passes the toolshed as --extra-index-url rather
@@ -15,8 +17,20 @@ requires-python = ">=3.10"
 # there automatically.
 dependencies = [
   "ChimeraX-Core ~=1.8",
-  "chemeleonx >=0.1,<0.2",
+  "chemur >=0.1,<0.2",
+  # Declared even though chemur already requires it: diagram.py and sdf_io.py
+  # import rdkit directly, so the bundle must not rely on it arriving
+  # transitively. Floor matches chemur's own pin.
+  "rdkit >=2023.9",
 ]
+# Deliberately NOT declared:
+#   numpy / matplotlib -- ChimeraX ships its own (numpy 1.26.4, matplotlib 3.10.1).
+#     Letting pip move them breaks every compiled ChimeraX extension built against
+#     that numpy ABI.
+#   chemur[trajectory] -- runner.run_trajectory uses chemur.trajectory.ArrayFrameSource,
+#     which needs only numpy. MDAnalysis is imported lazily inside
+#     MDAnalysisFrameSource, which this bundle never constructs.
+#   chemur[dataframe] -- TrajectoryResult.to_csv/to_json use stdlib csv/json.
 dynamic = ["classifiers"]
 
 [project.readme]
@@ -24,8 +38,8 @@ content-type = "text/markdown"
 file = "README.md"
 
 [project.urls]
-Homepage = "https://github.com/SweeneyAaron/chimerax-chemeleonx"
-Engine = "https://github.com/SweeneyAaron/chemeleonx"
+Homepage = "https://github.com/SweeneyAaron/chimerax-chemur"
+Engine = "https://github.com/SweeneyAaron/chemur"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -37,14 +51,14 @@ min-session-version = 1
 max-session-version = 1
 pure = true
 
-[tool.chimerax.command."chemeleonx interactions"]
+[tool.chimerax.command."chemur interactions"]
 category = "Structure Analysis"
-synopsis = "Predict ChemeleonX interactions for a structure and draw them as pseudobonds"
+synopsis = "Predict Chemur interactions for a structure and draw them as pseudobonds"
 
-[tool.chimerax.command."chemeleonx trajectory"]
+[tool.chimerax.command."chemur trajectory"]
 category = "Structure Analysis"
-synopsis = "Analyse ChemeleonX interactions per frame across an MD trajectory"
+synopsis = "Analyse Chemur interactions per frame across an MD trajectory"
 
-[tool.chimerax.tool."ChemeleonX"]
+[tool.chimerax.tool."Chemur"]
 category = "Structure Analysis"
-synopsis = "Predict biomolecular interactions with ChemeleonX"
+synopsis = "Predict biomolecular interactions with Chemur"
