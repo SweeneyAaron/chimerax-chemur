@@ -5,8 +5,8 @@ A UCSF ChimeraX bundle that runs
 open structure and visualizes the predicted interactions as colored pseudobonds, with
 both a **command** and a **GUI tool**.
 
-The bundle declares `chemur` as a dependency, so installing it pulls the engine
-from PyPI automatically.
+The bundle declares `chemur` as a dependency, so a normal install pulls the engine from
+PyPI automatically — but a repeated `devel install` does not (see [Install](#install)).
 
 > **Renamed from ChimeraX-ChemeleonX.** The bundle, the ChimeraX module, both commands,
 > the GUI tool and the underlying engine all changed name. pip treats `ChimeraX-Chemur`
@@ -17,8 +17,9 @@ from PyPI automatically.
 > ```
 > toolshed uninstall ChimeraX-ChemeleonX
 > pip uninstall chemeleonx
-> toolshed install ChimeraX-Chemur
 > ```
+>
+> Then install this bundle — see [Install](#install) below.
 >
 > If you go all the way back to the original release, remove that pair too:
 > `toolshed uninstall ChimeraX-ProPLID` and `pip uninstall proplid`.
@@ -81,41 +82,55 @@ colored by type (see `src/colors.py`).
 
 ## Install
 
-From the ChimeraX Toolshed (`Tools ▸ More Tools…`), or in ChimeraX's command line:
+> **Not on the ChimeraX Toolshed yet.** `toolshed install ChimeraX-Chemur` does not work
+> today — build and install from this repo instead (below). Once the bundle is published,
+> installing from `Tools ▸ More Tools…` will pull the `chemur` engine from PyPI as a
+> dependency, with no compiler needed: prebuilt wheels cover ChimeraX's CPython 3.11 on
+> macOS, Linux and Windows.
 
-```
-toolshed install ChimeraX-Chemur
-```
+### Build and install from source
 
-That pulls the `chemur` engine from PyPI as a dependency — no compiler needed;
-prebuilt wheels cover ChimeraX's CPython 3.11 on macOS, Linux and Windows.
+Everything here runs **inside ChimeraX**, through its own Python. The PEP 517 backend this
+bundle declares, `ChimeraX-BundleBuilder`, ships through the ChimeraX Toolshed and is **not
+on PyPI** — so `pip install .` and `python -m build` from an ordinary venv cannot work, and
+will fail while trying to fetch the backend. Use ChimeraX's `devel` command instead.
 
-## Local install (development)
-
-These steps target ChimeraX 1.10.1 on macOS; adjust the app path for 1.8 / 1.9 (all use
-Python 3.11). `CX` below is the ChimeraX app bundle.
+Set `CX` to your launcher. ChimeraX 1.8 / 1.9 / 1.10 all use Python 3.11; adjust the
+version in the path as needed.
 
 ```bash
-CX="/Applications/ChimeraX-1.10.1.app"
+# macOS
+CX="/Applications/ChimeraX-1.10.1.app/Contents/bin/ChimeraX"
 
+# Linux -- distro package, or the tarball/installer location
+CX="chimerax"                                  # or: /opt/UCSF/ChimeraX/bin/ChimeraX
+```
+
+Then, **from the root of this repo**:
+
+```bash
 # 1. Install the engine, through ChimeraX's OWN pip.
-#    Not "$CX/Contents/bin/python3.11" -m pip -- that can land in your macOS user
+#    Not "<chimerax>/bin/python3.11 -m pip" -- that can land in your user
 #    site-packages, which ChimeraX does not load.
-"$CX/Contents/bin/ChimeraX" --nogui --exit --cmd "pip install chemur"
+"$CX" --nogui --exit --cmd "pip install chemur"
 
 # 2. Confirm it landed and that the compiled core is active (must print True).
 #    There is no `shell` COMMAND in ChimeraX (Shell is a Tool), so use `runscript`.
-cd <this repo>
-"$CX/Contents/bin/ChimeraX" --nogui --exit --cmd "pip show chemur"
-"$CX/Contents/bin/ChimeraX" --nogui --exit --cmd "runscript tools/engine_check.py"
+"$CX" --nogui --exit --cmd "pip show chemur"
+"$CX" --nogui --exit --cmd "runscript tools/engine_check.py"
 
-# 3. Build + install this bundle into ChimeraX.
-#    IMPORTANT: `devel install` resolves the bundle's `src/` relative to the *current
-#    working directory*, not the path argument. Run it from THIS directory.
-"$CX/Contents/bin/ChimeraX" --nogui --exit --cmd "devel install . exit true"
+# 3a. Build a wheel only -- it lands in dist/.
+"$CX" --nogui --exit --cmd "devel build . exit true"
+
+# 3b. Or build AND install into ChimeraX -- normally what you want.
+"$CX" --nogui --exit --cmd "devel install . exit true"
 ```
 
-Re-run step 3 (from this directory) after each change to the bundle source, then restart
+**Run `devel` from this directory.** Both `devel build` and `devel install` resolve the
+bundle's `src/` relative to the *current working directory*, not the path argument — run
+them from anywhere else and they will not find the source.
+
+Re-run step 3b (from this directory) after each change to the bundle source, then restart
 ChimeraX.
 
 **Step 1 is not optional, and `devel install` will not do it for you.** When the bundle
@@ -144,7 +159,9 @@ sdist fallback ran and something went wrong.
 ## Tests
 
 The pure-logic parts of the bundle (`export`, `sdf_io`, `pose_compare`, and the
-engine→ChimeraX atom mapping in `runner`) are unit-tested without ChimeraX:
+engine→ChimeraX atom mapping in `runner`) are unit-tested without ChimeraX. The tests load
+modules by file path and stub the `chimerax.*` imports, so they run in an **ordinary venv or
+conda env — not ChimeraX's Python**:
 
 ```bash
 pip install pytest rdkit chemur

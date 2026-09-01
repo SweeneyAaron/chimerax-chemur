@@ -1,4 +1,4 @@
-"""The ``chemur interactions`` ChimeraX command."""
+"""The ``chemur interactions`` and ``chemur trajectory`` ChimeraX commands."""
 
 from __future__ import annotations
 
@@ -104,10 +104,19 @@ _traj_desc = CmdDesc(
 )
 
 
+_COMMANDS = {
+    "chemur interactions": (_desc, chemur_interactions),
+    "chemur trajectory": (_traj_desc, chemur_trajectory),
+}
+
+
 def register_command(name, logger):
     # ChimeraX calls this once per command declared in pyproject.toml; register the
-    # matching handler by name.
-    if name == "chemur trajectory":
-        register("chemur trajectory", _traj_desc, chemur_trajectory, logger=logger)
-    else:
-        register("chemur interactions", _desc, chemur_interactions, logger=logger)
+    # matching handler by name. An unknown name means a command was declared in
+    # pyproject.toml with no handler here, so fail loudly rather than quietly
+    # registering the wrong one under that name.
+    try:
+        desc, func = _COMMANDS[name]
+    except KeyError:
+        raise ValueError("ChimeraX-Chemur has no handler for command %r" % (name,))
+    register(name, desc, func, logger=logger)

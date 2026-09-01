@@ -9,7 +9,7 @@ class _ChemurBundleAPI(BundleAPI):
 
     @staticmethod
     def register_command(bi, ci, logger):
-        # Called once per registered command (here, "chemur interactions").
+        # Called once per command declared in pyproject.toml.
         from . import cmd
         cmd.register_command(ci.name, logger)
 
