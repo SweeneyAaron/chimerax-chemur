@@ -90,8 +90,8 @@ def test_coordinate_resolves_correct_copy_not_first():
     structure, atom_a, atom_b = _two_copy_structure()
     coord_index, name_index = runner._chimerax_atom_lookup(structure)
 
-    # The name index keeps the first copy (the old, buggy behaviour).
-    assert name_index[("B", "1", "KLQ", "C1")] is atom_a
+    # Retain every copy so name fallback can also reject ambiguity.
+    assert name_index[("B", "1", "KLQ", "C1")] == [atom_a, atom_b]
 
     # A Chemur record for the *second* copy must resolve to atom_b by coordinate,
     # not collapse onto atom_a 34 Å away.

@@ -13,9 +13,15 @@ from __future__ import annotations
 
 import os
 import tempfile
+from copy import deepcopy
+from itertools import count
+
+from .engine_support import (require_engine, check_cancel, analysis_options,
+                             projected_interactions, capture_analysis_options)
 
 from .colors import style_for
 
+_DRAW_IDS = count(1)
 PBG_NAME = "Chemur interactions"
 _PI_MARKERSET_NAME = "Chemur π-centres"
 _PI_MARKER_RADIUS = 0.4   # Å; small dot at each ring centre
@@ -32,23 +38,24 @@ _GEOMETRY_METADATA_KEYS = ("donor_angle", "point_plane_angle", "geometry", "occl
 class Endpoint:
     """One partner of an interaction: a ChimeraX atom plus grouping info.
 
-    ``ring_atoms`` (when set) holds the aromatic-ring member atoms for a π
-    endpoint; the interaction line then terminates at the ring centroid in both
-    the 3D view and the 2D diagram. ``atom`` stays a representative ring atom
-    (nearest the centroid) for selection/labels/grouping.
+    ``ring_atoms`` holds ring members for a ring-centroid endpoint.
+    ``center_atoms`` holds atoms defining another geometric center, such as the
+    carbon/nitrogen midpoint of an amide. ``atom`` remains a representative
+    atom for labels and residue grouping.
     """
 
     __slots__ = ("atom", "molecule_type", "chain_id", "residue_id", "residue_name",
-                 "ring_atoms")
+                 "ring_atoms", "center_atoms")
 
     def __init__(self, atom, molecule_type, chain_id, residue_id, residue_name,
-                 ring_atoms=None):
+                 ring_atoms=None, center_atoms=None):
         self.atom = atom
         self.molecule_type = molecule_type
         self.chain_id = chain_id
         self.residue_id = residue_id
         self.residue_name = residue_name
         self.ring_atoms = ring_atoms
+        self.center_atoms = center_atoms
 
     @property
     def residue_key(self):
@@ -60,6 +67,11 @@ class Endpoint:
 
     @property
     def atom_label(self):
+        if self.center_atoms:
+            return "midpoint (%s)" % ", ".join(
+                "/%s %s %s%s %s" % (atom.residue.chain_id, atom.residue.name,
+                    atom.residue.number, (atom.residue.insertion_code or "").strip(), atom.name)
+                for atom in self.center_atoms)
         return "/%s %s %s %s" % (self.chain_id, self.residue_name, self.residue_id, self.atom.name)
 
 
@@ -67,10 +79,11 @@ class InteractionRow:
     """One resolved interaction, ready for the results tree."""
 
     __slots__ = ("interaction_type", "endpoint1", "endpoint2", "distance",
-                 "angle", "offset", "extra", "pseudobond")
+                 "angle", "offset", "extra", "pseudobond", "interaction",
+                 "atom_ids", "feature_ids", "component_ids", "assignment_order")
 
     def __init__(self, interaction_type, endpoint1, endpoint2, distance,
-                 angle, offset, extra, pseudobond):
+                 angle, offset, extra, pseudobond, interaction=None):
         self.interaction_type = interaction_type
         self.endpoint1 = endpoint1
         self.endpoint2 = endpoint2
@@ -79,6 +92,11 @@ class InteractionRow:
         self.offset = offset
         self.extra = extra  # dict of other geometry (donor_angle, geometry, ...)
         self.pseudobond = pseudobond
+        self.interaction = interaction
+        self.atom_ids = tuple(getattr(interaction, "atom_ids", ()))
+        self.feature_ids = tuple(getattr(interaction, "feature_ids", ()))
+        self.component_ids = tuple(getattr(interaction, "component_ids", ()))
+        self.assignment_order = getattr(interaction, "assignment_order", None)
 
     def geometry_tooltip(self):
         parts = []
@@ -105,10 +123,12 @@ class LigandProtonation:
     """
 
     __slots__ = ("component_id", "name", "chain_id", "residue_id",
-                 "status", "smiles_used", "input_smiles", "net_charge", "reason")
+                 "status", "smiles_used", "input_smiles", "net_charge", "reason",
+                 "assembly_id", "component_ids", "editable", "chemistry_source", "diagnostics")
 
     def __init__(self, component_id, name, chain_id, residue_id, status,
-                 smiles_used, input_smiles, net_charge, reason):
+                 smiles_used, input_smiles, net_charge, reason, *, assembly_id=None,
+                 component_ids=None, editable=True, chemistry_source=None, diagnostics=()):
         self.component_id = component_id
         self.name = name
         self.chain_id = chain_id
@@ -118,6 +138,11 @@ class LigandProtonation:
         self.input_smiles = input_smiles
         self.net_charge = net_charge
         self.reason = reason
+        self.assembly_id = assembly_id or component_id
+        self.component_ids = tuple(component_ids or (component_id,))
+        self.editable = editable
+        self.chemistry_source = chemistry_source
+        self.diagnostics = tuple(diagnostics)
 
     @property
     def residue_label(self):
@@ -126,175 +151,214 @@ class LigandProtonation:
 
 
 class InteractionRun:
-    """Result of :func:`run_interactions`: drawable rows plus a ligand report."""
+    """A native assigned result plus its separately filtered display projection."""
 
-    __slots__ = ("rows", "ligand_report")
-
-    def __init__(self, rows, ligand_report):
+    def __init__(self, rows, ligand_report, result=None, source_models=(),
+                 id_to_atom=None, graphics=None, analysis_options=None):
+        self.analysis_options = deepcopy(analysis_options or {})
         self.rows = rows
         self.ligand_report = ligand_report
-
-
-class PoseInteractionRun:
-    """Result of :func:`run_pose_interactions` for one docked pose.
-
-    ``rows`` are :class:`InteractionRow`s mapped back to live ChimeraX atoms (the
-    pseudobond is ``None`` unless drawn). ``result`` is the engine
-    :class:`chemur.models.AnalysisResult`, kept so a caller can read interacting
-    residues straight from the engine output when atom mapping fails.
-    ``fully_mapped`` is ``False`` when the pose ligand's atoms could not be
-    resolved to ChimeraX atoms (so ``rows`` is empty and the engine-residue
-    fallback applies).
-    """
-
-    __slots__ = ("rows", "result", "fully_mapped")
-
-    def __init__(self, rows, result, fully_mapped):
-        self.rows = rows
         self.result = result
-        self.fully_mapped = fully_mapped
+        self.source_models = tuple(source_models)
+        self.id_to_atom = dict(id_to_atom or {})
+        self.graphics = list(graphics or ())
+        self.counts = {}
+        for row in rows:
+            self.counts[row.interaction_type] = self.counts.get(row.interaction_type, 0) + 1
+
+
+class PoseInteractionRun(InteractionRun):
+    """Native pose analysis, with explicit heavy-atom mapping completeness."""
+
+    def __init__(self, rows, result, fully_mapped=False, *, mapping_status=None,
+                 source_models=(), id_to_atom=None, graphics=None, pose_component_ids=None,
+                 analysis_options=None):
+        super().__init__(rows, _build_ligand_report(result), result, source_models,
+                         id_to_atom, graphics, analysis_options=analysis_options)
+        self.mapping_status = mapping_status or ("complete" if fully_mapped else "unavailable")
+        self.pose_component_ids = None if pose_component_ids is None else tuple(pose_component_ids)
+
+    @property
+    def fully_mapped(self):
+        return self.mapping_status == "complete"
 
 
 class TrajectoryRun:
-    """Result of :func:`run_trajectory`.
-
-    ``result`` is the engine :class:`chemur.trajectory.TrajectoryResult`.
-    ``key_to_atoms`` maps each interaction key (``result.interaction_key(...)``)
-    to the ChimeraX :class:`Atom` objects involved, so the GUI can select them in
-    3D. ``key_to_endpoints`` maps each key to its endpoint atom groups (one inner
-    list per interacting component, normally two) so the GUI can test selection
-    scope (≥1 end vs both ends selected). ``frame_coordset_ids`` are the ChimeraX
-    coordset ids aligned to ``result.frame_indices`` (for scrubbing the 3D view to
-    an analysed frame). ``rec_by_id``/``features_by_id``/``id_to_atom`` are the maps
-    needed to redraw a single frame's interactions as pseudobonds (see
-    :func:`draw_frame_interactions`).
-    """
-
-    __slots__ = ("result", "key_to_atoms", "key_to_endpoints", "structure",
-                 "frame_coordset_ids", "rec_by_id", "features_by_id", "id_to_atom")
+    """Native trajectory plus stable topology mapping and frame-aware participants."""
 
     def __init__(self, result, key_to_atoms, key_to_endpoints, structure,
-                 frame_coordset_ids, rec_by_id, features_by_id, id_to_atom):
+                 frame_coordset_ids, rec_by_id, features_by_id, id_to_atom,
+                 graphics=None, analysis_options=None):
+        self.analysis_options = deepcopy(analysis_options or {})
         self.result = result
+        self.ligand_report = _build_ligand_report(result)
         self.key_to_atoms = key_to_atoms
         self.key_to_endpoints = key_to_endpoints
         self.structure = structure
+        self.source_models = (structure,)
         self.frame_coordset_ids = frame_coordset_ids
         self.rec_by_id = rec_by_id
         self.features_by_id = features_by_id
         self.id_to_atom = id_to_atom
+        self.graphics = list(graphics or ())
+        self.rows = []
+        self._frames = {f.frame_index: f for f in result.frames}
+
+    def frame_participants(self, frame_index=None, key=None):
+        frames = self.result.frames if frame_index is None else [self._frames.get(frame_index)]
+        mapping = {}
+        for frame in frames:
+            if frame is None:
+                continue
+            for inter in frame.interactions:
+                ids = inter.atom_ids
+                if frame_index is None and inter.interaction_type == "hydrophobic_enclosure":
+                    ids = [inter.metadata["center_atom_id"]]
+                mapping[self.result.interaction_key(inter)] = [
+                    self.id_to_atom[a] for a in ids if a in self.id_to_atom]
+        if key is None:
+            return mapping
+        if key in mapping:
+            return mapping[key]
+        # Selecting an enclosure in a frame where it is absent still selects
+        # its stable center, never a shell borrowed from another frame. The
+        # per-frame mapping and endpoint groups remain empty for scope filters.
+        if (frame_index in self._frames and key[0] == "hydrophobic_enclosure"):
+            return self.frame_participants(None, key)
+        return []
+
+    def frame_endpoints(self, frame_index=None, key=None):
+        frames = self.result.frames if frame_index is None else [self._frames.get(frame_index)]
+        mapping = {}
+        for frame in frames:
+            if frame is None:
+                continue
+            for inter in frame.interactions:
+                groups = _interaction_groups(inter, self.rec_by_id, self.id_to_atom,
+                                             self.features_by_id)
+                if frame_index is None and inter.interaction_type == "hydrophobic_enclosure":
+                    groups = groups[:1]
+                mapping[self.result.interaction_key(inter)] = groups
+        return mapping if key is None else mapping.get(key, [])
+
+
+def _interaction_groups(inter, rec_by_id, id_to_atom, features_by_id=None):
+    if inter.interaction_type == "hydrophobic_enclosure":
+        center = inter.metadata.get("center_atom_id")
+        return [[id_to_atom[center]] if center in id_to_atom else [],
+                [id_to_atom[a] for a in inter.metadata.get("neighbor_atom_ids", ())
+                 if a in id_to_atom]]
+    if inter.interaction_type == "amide_pi":
+        features = _amide_pi_features(inter, features_by_id or {})
+        if features is None:
+            return []
+        # A backbone amide spans two residues but is one interaction partner.
+        return [[id_to_atom[a] for a in feat.atom_ids if a in id_to_atom]
+                for feat in features]
+    groups = {}
+    for aid in inter.atom_ids:
+        if aid in id_to_atom and aid in rec_by_id:
+            groups.setdefault(rec_by_id[aid].component_id, []).append(id_to_atom[aid])
+    return list(groups.values())
+
+
+def _map_atoms(result, structures):
+    coord_index, name_index = _chimerax_atom_lookup_multi(structures)
+    mapped = {}
+    for rec in result.atoms:
+        atom = _resolve_atom(rec, coord_index, name_index)
+        if atom is not None:
+            mapped[rec.atom_id] = atom
+    # A live atom cannot represent two distinct native atoms.
+    owners = {}
+    for aid, atom in mapped.items():
+        owners.setdefault(id(atom), []).append(aid)
+    duplicate_ids = {aid for aids in owners.values() if len(aids) > 1 for aid in aids}
+    return {aid: atom for aid, atom in mapped.items() if aid not in duplicate_ids}
 
 
 def run_interactions(session, structure, *, protonate=False, protonate_ph=7.4,
                      profile="default", ligand_smiles=None, add_hydrogens=True,
                      rule_overrides=None, selected_only=False,
-                     skip_biopolymer_internal=False):
-    """Run Chemur on ``structure``, draw interactions, and return rows.
-
-    ``selected_only`` keeps only interactions with at least one selected partner.
-    ``skip_biopolymer_internal`` drops protein-protein and nucleic-nucleic contacts.
-    ``rule_overrides`` is passed straight to :func:`chemur.analyze`.
-
-    Returns an :class:`InteractionRun` (``.rows`` for display, ``.ligand_report``
-    with per-non-standard-residue protonation status).
-    """
-    from chimerax.core.commands import run
+                     skip_biopolymer_internal=False, assembly_overrides=None,
+                     hydrophobic_enclosure=None, cancel_check=None):
+    """Analyse native assigned data, then map/filter only its displayed projection."""
     from chimerax.core.errors import UserError
 
-    analyze = _import_analyze()
-
+    engine = require_engine()
+    options = analysis_options(engine, profile=profile, rule_overrides=rule_overrides,
+                               hydrophobic_enclosure=hydrophobic_enclosure,
+                               assembly_overrides=assembly_overrides)
+    settings = capture_analysis_options(engine, options, protonate=protonate,
+        protonate_ph_min=protonate_ph, protonate_ph_max=protonate_ph,
+        ligand_smiles=ligand_smiles, add_hydrogens=add_hydrogens,
+        selected_only=selected_only, skip_biopolymer_internal=skip_biopolymer_internal,
+        hydrophobic_enclosure=hydrophobic_enclosure)
+    check_cancel(cancel_check)
     if selected_only and not any(atom.selected for atom in structure.atoms):
         raise UserError("Select some atoms first, or turn off 'selected atoms only'.")
-
-    if add_hydrogens:
-        # Chemur needs explicit donor hydrogens to assign H-bond-like interactions.
-        run(session, "addh #%s" % structure.id_string)
-
-    # Drop any ring-centre markers left by a previous run *before* saving: the
-    # MarkerSet is a child model of the structure, so 'save models #<id>' would
-    # otherwise emit it as a second coordinate block and gemmi rejects the file.
-    _clear_pi_markers(structure)
-
-    handle = tempfile.NamedTemporaryFile(suffix=".cif", delete=False)
-    handle.close()
-    path = handle.name
+    _addh_and_clear(session, [structure], add_hydrogens, cancel_check=cancel_check)
+    path = save_models_mmcif(session, [structure])
     try:
-        run(session, 'save "%s" models #%s format mmcif' % (path, structure.id_string))
-        result = analyze(
-            path,
-            protonate=protonate,
-            protonate_ph_min=protonate_ph,
-            protonate_ph_max=protonate_ph,
-            profile=profile,
-            ligand_smiles=ligand_smiles or None,
-            rule_overrides=rule_overrides or None,
-        )
+        check_cancel(cancel_check)
+        result = engine.analyze(path, protonate=protonate,
+                                protonate_ph_min=protonate_ph, protonate_ph_max=protonate_ph,
+                                ligand_smiles=ligand_smiles or None, **options)
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-
+        _unlink(path)
+    check_cancel(cancel_check)
     ligand_report = _build_ligand_report(result)
-
     skipped = result.metadata.get("skipped_ligands") or {}
     if skipped:
-        session.logger.warning(
-            "Chemur skipped %d ligand(s) it could not template: %s"
-            % (len(skipped), ", ".join(sorted(skipped)))
-        )
-
-    rec_by_id = {rec.atom_id: rec for rec in result.atoms}
-    features_by_id = {f.feature_id: f for f in result.features}
-    coord_index, name_index = _chimerax_atom_lookup(structure)
-    id_to_atom = {}
-    for rec in result.atoms:
-        atom = _resolve_atom(rec, coord_index, name_index)
-        if atom is not None:
-            id_to_atom[rec.atom_id] = atom
-
+        session.logger.warning("Chemur skipped %d ligand(s): %s" %
+                               (len(skipped), ", ".join(sorted(skipped))))
+    id_to_atom = _map_atoms(result, [structure])
+    check_cancel(cancel_check)
+    graphics = []
     rows = _draw_interactions(
         session, structure, result.interactions,
-        rec_by_id, id_to_atom, features_by_id,
-        selected_only=selected_only,
+        {a.atom_id: a for a in result.atoms}, id_to_atom,
+        {f.feature_id: f for f in result.features}, selected_only=selected_only,
         skip_biopolymer_internal=skip_biopolymer_internal,
-    )
-    return InteractionRun(rows, ligand_report)
+        graphics=graphics, cancel_check=cancel_check)
+    run = InteractionRun(rows, ligand_report, result, [structure], id_to_atom, graphics,
+                         analysis_options=settings)
+    _track_graphics(session, run.source_models, run.graphics)
+    if cancel_check is None:
+        previous = getattr(structure, "_chemur_command_graphics", ())
+        structure._chemur_command_graphics = run.graphics
+        _discard_graphics(session, previous)
+    return run
 
 
 def _import_analyze():
-    """Import ``chemur.analyze`` or raise a UserError explaining how to install."""
-    from chimerax.core.errors import UserError
+    return require_engine().analyze
+
+
+def _discard_graphics(session, graphics):
+    """Best-effort removal of partially created graphics on failed/cancelled draws."""
+    for handle in list(graphics):
+        if getattr(handle, "deleted", False):
+            continue
+        try:
+            if getattr(handle, "id", None) is None:
+                handle.delete()
+            else:
+                session.models.close([handle])
+        except Exception:
+            pass
+
+
+def _track_graphics(session, source_models, graphics):
+    from .lifecycle import track_graphics
+    return track_graphics(session, source_models, graphics)
+
+
+def _unlink(path):
     try:
-        from chemur import analyze
-        return analyze
-    except ImportError as e:
-        import importlib.util
-        if importlib.util.find_spec("chemur") is None:
-            # Engine genuinely absent from ChimeraX's environment. Install it via
-            # ChimeraX's own pip (not '<ChimeraX>/bin/python -m pip', which can land
-            # in your user site-packages that ChimeraX does not load).
-            raise UserError(
-                "The 'chemur' engine is not installed in ChimeraX's Python.\n"
-                "It is a declared dependency of this bundle, so normally\n"
-                "    toolshed install ChimeraX-Chemur\n"
-                "pulls it in. To install it on its own, run:\n"
-                "    pip install chemur\n"
-                "Verify it landed in ChimeraX with:  pip show chemur"
-            ) from e
-        # Engine is present but failed to import (e.g. a broken build or a missing
-        # dependency). Surface the real error instead of mislabelling it.
-        # ChimeraX's `pip` command takes a single requirement and has no
-        # --force-reinstall, so a refresh is uninstall-then-install. The restart is
-        # load-bearing: sys.modules already holds the broken partial import.
-        raise UserError(
-            "The 'chemur' engine is installed but failed to import: %s\n"
-            "Reinstall it into ChimeraX with:\n"
-            "    pip uninstall chemur\n"
-            "    pip install chemur\n"
-            "then restart ChimeraX."
-            % e
-        ) from e
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _has_protein(structure):
@@ -303,138 +367,329 @@ def _has_protein(structure):
     return any(r.polymer_type == Residue.PT_AMINO for r in structure.residues)
 
 
-def _addh_and_clear(session, structures, add_hydrogens):
-    """Optionally add hydrogens, then clear Chemur π-centre markers before a save.
-
-    The ring-centre MarkerSet is a child model; left in place 'save models' emits a
-    second coordinate block that gemmi rejects (see run_interactions).
-    """
+def _addh_and_clear(session, structures, add_hydrogens, *, cancel_check=None):
+    """Prepare input hydrogens; old result graphics survive until a new draw."""
     from chimerax.core.commands import run
     if add_hydrogens:
-        for s in structures:
-            run(session, "addh #%s" % s.id_string)
-    for s in structures:
-        _clear_pi_markers(s)
+        for structure in structures:
+            check_cancel(cancel_check)
+            run(session, "addh #%s" % structure.id_string)
+    check_cancel(cancel_check)
 
 
 def save_models_mmcif(session, structures):
-    """Save ``structures`` to one temp mmCIF; return its path. Caller deletes it.
+    """Save one scene-coordinate snapshot, without child markers or inactive states.
 
-    The model spec writes the ``#`` once and comma-joins the ids (``#1,3``); a
-    repeated ``#`` (``#1,#3``) is rejected by ChimeraX's spec parser.
+    ChimeraX writes separate data blocks for separate models and emits alternate
+    conformers. Chemur consumes one coordinate block: normalize the temporary
+    export to exactly the live atoms' active positions, keeping named chemistry.
+    No source model, coordinate set, or alternate-location selection is changed.
     """
-    from chimerax.core.commands import run
+    from chimerax.mmcif.mmcif_write import write_mmcif
+    from .source_chemistry import preserve_source_chemistry
+    structures = list(structures)
+    source_components = {}
+    for model_index, structure in enumerate(structures):
+        for atom in structure.atoms:
+            residue = atom.residue
+            identity = (residue.chain_id or "_", residue.name,
+                        "%d%s" % (residue.number, (residue.insertion_code or "").strip()))
+            previous = source_components.setdefault(identity, model_index)
+            if previous != model_index:
+                raise ValueError("Source models contain the same component identity %s. "
+                                 "Give the models distinct chain identifiers before joint analysis." %
+                                 ":".join(identity))
+    snapshots = []
+    for model_index, structure in enumerate(structures):
+        for atom_index, atom in enumerate(structure.atoms):
+            residue = atom.residue
+            snapshots.append({
+                "id": (model_index, atom_index), "model": model_index,
+                "element": atom.element.name.upper(),
+                "name": (residue.chain_id or "_", residue.name,
+                         "%d%s" % (residue.number, (residue.insertion_code or "").strip()), atom.name),
+                "coord": tuple(float(v) for v in _scene_coord(atom)),
+                "altloc": str(getattr(atom, "alt_loc", "") or "").strip(),
+            })
     handle = tempfile.NamedTemporaryFile(suffix=".cif", delete=False)
     handle.close()
-    path = handle.name
-    spec = "#" + ",".join(s.id_string for s in structures)
-    run(session, 'save "%s" models %s format mmcif' % (path, spec))
-    return path
+    try:
+        write_mmcif(session, handle.name, models=structures, rel_model=None, all_coordsets=False)
+        preserve_source_chemistry(handle.name, structures, logger=session.logger)
+        _normalize_mmcif_snapshot(handle.name, snapshots, len(structures))
+    except BaseException:
+        _unlink(handle.name)
+        raise
+    return handle.name
+
+
+def _normalize_mmcif_snapshot(path, snapshots, model_count):
+    """Keep one active row per input atom and merge molecular tables into one block."""
+    import gemmi
+    document = gemmi.cif.read_file(str(path))
+    coordinate_blocks = [block for block in document if block.get_mmcif_category("_atom_site.")]
+    if not coordinate_blocks:
+        raise ValueError("ChimeraX wrote no coordinates for the selected source models")
+    block_owner = {block.name: index for index, block in enumerate(coordinate_blocks)}
+    by_name = {}
+    for atom in snapshots:
+        by_name.setdefault(atom["name"], []).append(atom)
+
+    def value(row, *keys, default=""):
+        for key in keys:
+            v = row.get(key)
+            if v not in (None, False, "", ".", "?"):
+                return str(v)
+        return default
+
+    # These are the coordinate/chemistry categories the engine reads, plus the
+    # entity/asymmetry tables needed to make their identifiers unambiguous.
+    categories = (
+        "_atom_site.", "_chem_comp.", "_chem_comp_atom.", "_chem_comp_bond.",
+        "_pdbx_chem_comp_descriptor.", "_struct_conn.", "_struct_asym.",
+        "_entity.", "_entity_poly.", "_entity_poly_seq.", "_pdbx_entity_nonpoly.",
+        "_pdbx_poly_seq_scheme.", "_pdbx_nonpoly_scheme.", "_pdbx_branch_scheme.",
+        "_pdbx_entity_branch.", "_pdbx_entity_branch_list.", "_pdbx_entity_branch_link.",
+        "_chemur_source_residue.", "_pdbx_struct_mod_residue.",
+    )
+    merged = {category: [] for category in categories}
+    seen_rows = {category: set() for category in categories}
+    seen_atoms = set()
+    for block_index, block in enumerate(document):
+        owner = block_owner.get(block.name) if len(coordinate_blocks) == model_count else None
+        prefix = "s%d_" % (block_index + 1) if len(coordinate_blocks) > 1 else ""
+        for category in categories:
+            columns = block.get_mmcif_category(category)
+            if not columns:
+                continue
+            for values in zip(*columns.values()):
+                row = dict(zip(columns, values))
+                if category == "_atom_site.":
+                    name = (value(row, "auth_asym_id", "label_asym_id", default="_"),
+                            value(row, "auth_comp_id", "label_comp_id"),
+                            value(row, "auth_seq_id", "label_seq_id") + value(row, "pdbx_PDB_ins_code"),
+                            value(row, "auth_atom_id", "label_atom_id"))
+                    coord = tuple(float(row[key]) for key in ("Cartn_x", "Cartn_y", "Cartn_z"))
+                    altloc = value(row, "label_alt_id")
+                    element = value(row, "type_symbol").upper()
+                    matches = [atom for atom in by_name.get(name, ())
+                               if (owner is None or atom["model"] == owner)
+                               and atom["element"] == element
+                               and (not altloc or atom["altloc"] == altloc)
+                               and _sq_dist(atom["coord"], coord) <= _COORD_EPS ** 2]
+                    if not matches:
+                        continue  # An inactive alternate conformer.
+                    if len(matches) != 1:
+                        raise ValueError("Source atom identity is ambiguous while exporting %s" % (name,))
+                    atom = matches[0]
+                    if atom["id"] in seen_atoms:
+                        continue
+                    seen_atoms.add(atom["id"])
+                    row["id"] = str(len(merged[category]) + 1)
+                    row["pdbx_PDB_model_num"] = "1"
+                if prefix:
+                    for key, item in list(row.items()):
+                        if item in (None, False, "", ".", "?"):
+                            continue
+                        if (key in {"label_asym_id", "asym_id", "label_entity_id", "entity_id"}
+                                or key.endswith("_label_asym_id")
+                                or (category in {"_entity.", "_struct_asym.", "_struct_conn."} and key == "id")):
+                            row[key] = prefix + str(item)
+                # Identical component dictionaries across source models are one
+                # dictionary. Conflicting definitions remain visible to Chemur's
+                # validator instead of silently choosing one chemical state.
+                row_key = tuple(sorted(row.items()))
+                if row_key not in seen_rows[category]:
+                    seen_rows[category].add(row_key)
+                    merged[category].append(row)
+    missing = [atom for atom in snapshots if atom["id"] not in seen_atoms]
+    if missing:
+        raise ValueError("Could not export %d source atom(s) at their active coordinates (first: %s)" %
+                         (len(missing), ":".join(missing[0]["name"])))
+    combined = gemmi.cif.Document()
+    block = combined.add_new_block("chemur_snapshot")
+    source_entries = {row.get("source_entry_id") for row in merged["_chemur_source_residue."]
+                      if row.get("source_entry_id") not in (None, False, "", ".", "?")}
+    block.set_pair("_entry.id", next(iter(source_entries)) if len(source_entries) == 1 else "chemur_snapshot")
+    for category, rows in merged.items():
+        if not rows:
+            continue
+        names = list(dict.fromkeys(key for row in rows for key in row))
+        block.set_mmcif_category(category, {name: [row.get(name, False) for row in rows] for name in names})
+    combined.write_file(str(path))
+
+
+def _source_atom_snapshot(structures, pose):
+    """Freeze input ownership before analysis, independently of later live mapping."""
+    snapshot = []
+    for structure in structures:
+        for atom in structure.atoms:
+            residue = atom.residue
+            snapshot.append((structure is pose, atom.element.name.upper(),
+                (residue.chain_id or "_", residue.name,
+                 "%d%s" % (residue.number, (residue.insertion_code or "").strip()), atom.name),
+                tuple(float(v) for v in _scene_coord(atom))))
+    return tuple(snapshot)
+
+
+def _pose_component_ids(result, *, whole_complex=False, sdf_path=None, snapshot=None):
+    """Identify native targets from input provenance, never from drawable contacts.
+
+    None denotes ambiguous provenance, () a confidently absent native ligand.
+    Component-ID collisions across receptor and pose cannot be represented safely
+    by a component selection and are explicitly unresolved.
+    """
+    ligand_atoms = [a for a in result.atoms if a.molecule_type == "ligand" and a.element != "H"]
+    if whole_complex:
+        selected = {a.component_id for a in ligand_atoms}
+    elif sdf_path is not None:
+        selected = {a.component_id for a in ligand_atoms
+                    if a.metadata.get("source") == "sdf"
+                    and a.metadata.get("source_path") == str(sdf_path)}
+        selected.update(c.component_id for c in result.components
+                        if c.molecule_type == "ligand" and c.metadata.get("source") == "sdf"
+                        and c.metadata.get("source_path") == str(sdf_path))
+    elif snapshot is not None:
+        ownership = {}
+        spatial = {}
+        def cell(coord):
+            import math
+            return tuple(math.floor(float(value) / _COORD_EPS) for value in coord)
+        for item in snapshot:
+            spatial.setdefault((item[1], cell(item[3])), []).append(item)
+        for atom in ligand_atoms:
+            x, y, z = cell(atom.coord)
+            nearby = [item for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                      for item in spatial.get((atom.element.upper(), (x + dx, y + dy, z + dz)), ())]
+            matches = [item for item in nearby if _sq_dist(item[3], atom.coord) <= _COORD_EPS ** 2]
+            name = (atom.chain_id, atom.residue_name, str(atom.residue_id), atom.name)
+            named = [item for item in matches if item[2] == name]
+            if named:
+                matches = named
+            owners = {item[0] for item in matches}
+            if len(owners) != 1:
+                return None
+            ownership.setdefault(atom.component_id, set()).update(owners)
+        if any(len(owners) > 1 for owners in ownership.values()):
+            return None
+        selected = {cid for cid, owners in ownership.items() if owners == {True}}
+    else:
+        return None
+    registry = result.metadata.get("ligand_assemblies") or {}
+    for record in registry.values():
+        members = set(record.get("component_ids", ()))
+        if members & selected:
+            selected.update(members)
+    return tuple(sorted(selected))
 
 
 def run_pose_interactions(session, pose, receptor=None, *, protonate=False,
                           protonate_ph=7.4, profile="default", ligand_smiles=None,
                           add_hydrogens=True, rule_overrides=None,
                           skip_biopolymer_internal=True, draw=False,
-                          selected_only=False, receptor_path=None):
-    """Analyse one docked ligand pose's interactions with the receptor.
-
-    Routing (auto-detected):
-
-    * **Full receptor+ligand complex** (``pose`` already contains protein): analyse
-      the pose on its own from a temp mmCIF.
-    * **Ligand-only pose loaded from an SDF** (carries ``Bond.order``): re-emit the
-      ligand to a temp SDF — preserving element/coords/bond-order chemistry, which a
-      ChimeraX-written mmCIF would lose — and analyse it against the receptor via the
-      engine's native ``ligand_sdf`` path. ``receptor_path`` (a pre-saved receptor
-      mmCIF) is reused when given, else the receptor is saved here.
-    * **Ligand-only pose without bond orders** (not from SDF): merge with the receptor
-      in one mmCIF and rely on CCD/user SMILES for chemistry.
-
-    Engine atoms are mapped back to the real ChimeraX atoms (by coordinate, name as
-    fallback) across the involved models, so rows can drive 3D selection. Returns a
-    :class:`PoseInteractionRun`. ``draw`` is reserved for pseudobond drawing; the
-    comparison figure uses ``draw=False``. ``selected_only`` is accepted for signature
-    compatibility but ignored.
-    """
+                          selected_only=False, receptor_path=None,
+                          receptor_acceptors=None, assembly_overrides=None,
+                          hydrophobic_enclosure=None, cancel_check=None):
+    """Analyse a pose while retaining its full native result and mapping status."""
     from .sdf_io import has_bond_orders, write_ligand_sdf
 
-    analyze = _import_analyze()
-
+    engine = require_engine()
+    common = analysis_options(engine, profile=profile, rule_overrides=rule_overrides,
+                              hydrophobic_enclosure=hydrophobic_enclosure,
+                              assembly_overrides=assembly_overrides)
+    common.update(protonate=protonate, protonate_ph_min=protonate_ph,
+                  protonate_ph_max=protonate_ph)
+    check_cancel(cancel_check)
     pose_has_protein = _has_protein(pose)
-    use_sdf = (not pose_has_protein) and (receptor is not None) and has_bond_orders(pose)
-
-    common = dict(protonate=protonate, protonate_ph_min=protonate_ph,
-                  protonate_ph_max=protonate_ph, profile=profile,
-                  rule_overrides=rule_overrides or None)
+    use_sdf = not pose_has_protein and receptor is not None and has_bond_orders(pose)
+    settings = capture_analysis_options(engine, common, ligand_smiles=ligand_smiles,
+        add_hydrogens=add_hydrogens, selected_only=selected_only,
+        skip_biopolymer_internal=skip_biopolymer_internal, draw=draw,
+        hydrophobic_enclosure=hydrophobic_enclosure,
+        input_route="sdf" if use_sdf else "complex_mmcif" if pose_has_protein else "merged_mmcif")
     temp_paths = []
+    pose_snapshot = None
+    sdf_path = None
     try:
-        if pose_has_protein:
-            _addh_and_clear(session, [pose], add_hydrogens)
-            path = save_models_mmcif(session, [pose])
-            temp_paths.append(path)
-            structures = [pose]
-            result = analyze(path, ligand_smiles=ligand_smiles or None, **common)
-
-        elif use_sdf:
-            # Do NOT run ChimeraX 'addh' on the ligand: it can break the SDF's own
-            # valence so RDKit can't sanitise it (the cause of "Could not parse
-            # molecule"). Clear stray π-markers only; RDKit adds valence-consistent
-            # hydrogens when writing the SDF instead.
-            _clear_pi_markers(pose)
+        if use_sdf:
+            rpath = receptor_path
+            if rpath is None:
+                _addh_and_clear(session, [receptor], add_hydrogens, cancel_check=cancel_check)
+                rpath = save_models_mmcif(session, [receptor])
+                temp_paths.append(rpath)
+            check_cancel(cancel_check)
+            orient_hydrogens = not (protonate or ligand_smiles or assembly_overrides)
+            targets = receptor_acceptors if orient_hydrogens else None
+            if add_hydrogens and orient_hydrogens and targets is None:
+                from .lifecycle import RunCancelled
+                try:
+                    targets = prepare_receptor_acceptors(rpath, engine=engine,
+                        assembly_overrides=assembly_overrides, cancel_check=cancel_check)
+                except RunCancelled:
+                    raise
+                except Exception as exc:
+                    session.logger.warning("Chemur could not type receptor acceptors; "
+                                           "receptor-guided hydrogen orientation was skipped: %s" % exc)
+                    targets = ()
             sdf_handle = tempfile.NamedTemporaryFile(suffix=".sdf", delete=False)
             sdf_handle.close()
             temp_paths.append(sdf_handle.name)
+            sdf_path = sdf_handle.name
+            check_cancel(cancel_check)
             write_ligand_sdf(pose, sdf_handle.name, name=_ligand_name(pose),
-                             add_hydrogens=add_hydrogens)
-            rpath = receptor_path
-            if rpath is None:
-                _addh_and_clear(session, [receptor], add_hydrogens)
-                rpath = save_models_mmcif(session, [receptor])
-                temp_paths.append(rpath)
+                             add_hydrogens=add_hydrogens,
+                             acceptor_coords=_nearby_acceptors(targets, pose))
             structures = [receptor, pose]
-            result = analyze(rpath, ligand_sdf=[sdf_handle.name], **common)
-
+            check_cancel(cancel_check)
+            result = engine.analyze(rpath, ligand_sdf=[sdf_handle.name],
+                                    ligand_smiles=ligand_smiles or None, **common)
         else:
-            structures = [receptor, pose] if receptor is not None else [pose]
-            _addh_and_clear(session, structures, add_hydrogens)
+            structures = [pose] if pose_has_protein or receptor is None else [receptor, pose]
+            _addh_and_clear(session, structures, add_hydrogens, cancel_check=cancel_check)
+            pose_snapshot = _source_atom_snapshot(structures, pose)
             path = save_models_mmcif(session, structures)
             temp_paths.append(path)
-            result = analyze(path, ligand_smiles=ligand_smiles or None, **common)
+            check_cancel(cancel_check)
+            result = engine.analyze(path, ligand_smiles=ligand_smiles or None, **common)
     finally:
-        for p in temp_paths:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-
-    rec_by_id = {rec.atom_id: rec for rec in result.atoms}
+        for path in temp_paths:
+            _unlink(path)
+    # In particular, never touch models after a closed-model cancellation.
+    check_cancel(cancel_check)
+    target_components = _pose_component_ids(result, whole_complex=pose_has_protein,
+                                           sdf_path=sdf_path, snapshot=pose_snapshot)
+    id_to_atom = _map_atoms(result, structures)
+    ligand_ids = [a.atom_id for a in result.atoms if a.molecule_type == "ligand"
+                  and target_components is not None and a.component_id in target_components
+                  and a.element != "H" and not a.metadata.get("ignored_by_template")]
+    rec_by_id = {a.atom_id: a for a in result.atoms}
+    required_ids = set(ligand_ids)
+    for interaction in projected_interactions(result.interactions):
+        if set(ligand_ids).intersection(interaction.atom_ids):
+            required_ids.update(aid for aid in interaction.atom_ids
+                                if aid in rec_by_id and rec_by_id[aid].element != "H")
+    resolved = sum(aid in id_to_atom for aid in ligand_ids)
+    status = ("complete" if ligand_ids and required_ids.issubset(id_to_atom)
+              else "partial" if resolved else "unavailable")
     features_by_id = {f.feature_id: f for f in result.features}
-    coord_index, name_index = _chimerax_atom_lookup_multi(structures)
-    id_to_atom = {}
-    for rec in result.atoms:
-        atom = _resolve_atom(rec, coord_index, name_index)
-        if atom is not None:
-            id_to_atom[rec.atom_id] = atom
-
-    ligand_atom_ids = [rec.atom_id for rec in result.atoms
-                       if rec.molecule_type == "ligand"]
-    ligand_resolved = sum(1 for aid in ligand_atom_ids if aid in id_to_atom)
-    fully_mapped = bool(ligand_atom_ids) and ligand_resolved > 0
-
+    graphics = []
+    check_cancel(cancel_check)
     if draw:
-        draw_on = receptor if (len(structures) == 2 and receptor is not None) else pose
-        rows = _draw_interactions(
-            session, draw_on, result.interactions,
-            rec_by_id, id_to_atom, features_by_id,
+        draw_on = receptor if len(structures) == 2 else pose
+        rows = _draw_interactions(session, draw_on, result.interactions,
+            rec_by_id, id_to_atom, features_by_id, selected_only=selected_only,
             skip_biopolymer_internal=skip_biopolymer_internal,
-        )
+            graphics=graphics, cancel_check=cancel_check)
     else:
-        rows = _resolve_rows(
-            result.interactions, rec_by_id, id_to_atom, features_by_id,
-            skip_biopolymer_internal=skip_biopolymer_internal,
-        )
-    return PoseInteractionRun(rows, result, fully_mapped)
+        rows = _resolve_rows(result.interactions, rec_by_id, id_to_atom, features_by_id,
+                             selected_only=selected_only,
+                             skip_biopolymer_internal=skip_biopolymer_internal)
+    run = PoseInteractionRun(rows, result, mapping_status=status,
+                             source_models=structures, id_to_atom=id_to_atom, graphics=graphics,
+                             pose_component_ids=target_components, analysis_options=settings)
+    if draw:
+        _track_graphics(session, run.source_models, run.graphics)
+    return run
 
 
 def _ligand_name(pose):
@@ -443,303 +698,293 @@ def _ligand_name(pose):
     return base[:16].upper()
 
 
-def _resolve_rows(interactions, rec_by_id, id_to_atom, features_by_id, *,
-                  skip_biopolymer_internal=False, included_types=None):
-    """Map ``interactions`` to :class:`InteractionRow`s WITHOUT drawing pseudobonds.
+# Only receptor atoms within this far of the pose can accept from it; the rest are
+# not worth carrying into the per-hydrogen scoring.
+_ACCEPTOR_CUTOFF = 6.0
+def prepare_receptor_acceptors(path, *, engine=None, assembly_overrides=None,
+                               cancel_check=None):
+    """Typed scene-coordinate receptor snapshot matching the SDF analysis route."""
+    engine = engine or require_engine()
+    check_cancel(cancel_check)
+    atoms, components = engine.parse_structure(path, include_ligands=False)
+    engine.prepare_ligand_chemistry(atoms, components, sdf_mode=True,
+                                   assembly_overrides=assembly_overrides, fetch_ccd=False)
+    check_cancel(cancel_check)
+    return tuple(f.center for f in engine.perceive_features(atoms, components)
+                 if f.feature_type == "acceptor")
 
-    The non-drawing counterpart of :func:`_draw_interactions`, used by
-    :func:`run_pose_interactions` for the comparison figure. Rows carry endpoints
-    (with their ChimeraX atoms) but ``pseudobond=None``.
-    """
+
+def _nearby_acceptors(acceptor_coords, pose):
+    """Restrict an already typed snapshot to the scene-coordinate pose neighborhood."""
+    if acceptor_coords is None:
+        return None
+    pose_coords = [_scene_coord(atom) for atom in pose.atoms]
+    if not pose_coords:
+        return []
+    cutoff2 = _ACCEPTOR_CUTOFF ** 2
+    return [tuple(float(v) for v in coord) for coord in acceptor_coords
+            if any(_sq_dist(coord, p) <= cutoff2 for p in pose_coords)]
+
+
+def _resolve_rows(interactions, rec_by_id, id_to_atom, features_by_id, *,
+                  skip_biopolymer_internal=False, included_types=None,
+                  selected_only=False):
+    """Map actual unique legs; native interactions are never view-filtered."""
     rows = []
-    for inter in interactions:
+    for inter in projected_interactions(interactions):
         if included_types is not None and inter.interaction_type not in included_types:
             continue
         endpoints = _choose_endpoints(inter, rec_by_id, id_to_atom, features_by_id)
         if endpoints is None:
             continue
         ep1, ep2 = endpoints
+        if selected_only and not any(
+                atom.selected for ep in endpoints
+                for atom in (ep.center_atoms or [ep.atom])):
+            continue
         if skip_biopolymer_internal and _is_biopolymer_internal(ep1, ep2):
             continue
-        rows.append(InteractionRow(
-            inter.interaction_type, ep1, ep2,
-            inter.distance, inter.angle, inter.offset,
-            _geometry_extra(inter), None,
-        ))
+        rows.append(InteractionRow(inter.interaction_type, ep1, ep2,
+            inter.distance, inter.angle, inter.offset, _geometry_extra(inter), None, inter))
     return rows
 
 
 def _draw_interactions(session, structure, interactions, rec_by_id, id_to_atom,
                        features_by_id, *, selected_only=False,
-                       skip_biopolymer_internal=False, included_types=None):
-    """Map ``interactions`` to ChimeraX atoms, (re)draw the pseudobonds, return rows.
-
-    Clears the structure's Chemur pseudobond groups + π markers first, so calling
-    this repeatedly (e.g. per trajectory frame) replaces the previous drawing.
-    ``included_types`` (optional set) restricts which interaction types are drawn.
-    Shared by :func:`run_interactions` and :func:`draw_frame_interactions`.
-    """
-    pbg = structure.pseudobond_group(PBG_NAME)
-    if pbg.num_pseudobonds:
-        pbg.pseudobonds.delete()
-    pi_pbg = session.pb_manager.get_group(_pi_group_name(structure), create=True)
-    if pi_pbg.num_pseudobonds:
-        pi_pbg.pseudobonds.delete()
-    _clear_pi_markers(structure)
-    marker_holder = {}  # lazily-created MarkerSet + per-ring marker cache
-
-    rows = []
+                       skip_biopolymer_internal=False, included_types=None,
+                       graphics=None, cancel_check=None):
+    """Replace display graphics after successful analysis and cancellation checks."""
+    check_cancel(cancel_check)
+    projected = projected_interactions(interactions)
+    rows = _resolve_rows(projected, rec_by_id, id_to_atom, features_by_id,
+        selected_only=selected_only, skip_biopolymer_internal=skip_biopolymer_internal,
+        included_types=included_types)
+    check_cancel(cancel_check)
+    draw_id = next(_DRAW_IDS)
+    pbg = structure.pseudobond_group("%s (%d)" % (PBG_NAME, draw_id))
+    pi_pbg = session.pb_manager.get_group("%s (%d)" % (_pi_group_name(structure), draw_id), create=True)
+    marker_holder = {"graphics": graphics, "ms_name": "%s (%d)" % (_PI_MARKERSET_NAME, draw_id)}
+    if graphics is not None:
+        graphics[:] = [pbg, pi_pbg]
     counts = {}
-    unresolved = 0
-    filtered = 0
-    for inter in interactions:
-        if included_types is not None and inter.interaction_type not in included_types:
-            filtered += 1
-            continue
-        endpoints = _choose_endpoints(inter, rec_by_id, id_to_atom, features_by_id)
-        if endpoints is None:
-            unresolved += 1
-            continue
-        ep1, ep2 = endpoints
-
-        if selected_only and not (ep1.atom.selected or ep2.atom.selected):
-            filtered += 1
-            continue
-        if skip_biopolymer_internal and _is_biopolymer_internal(ep1, ep2):
-            filtered += 1
-            continue
-
-        style = style_for(inter.interaction_type)
-        pb = _draw_interaction(session, structure, ep1, ep2, style, pbg, pi_pbg, marker_holder)
-        if pb is None:
-            # Duplicate pair within the same group, or otherwise invalid.
-            unresolved += 1
-            continue
-        rows.append(InteractionRow(
-            inter.interaction_type, ep1, ep2,
-            inter.distance, inter.angle, inter.offset,
-            _geometry_extra(inter), pb,
-        ))
-        counts[inter.interaction_type] = counts.get(inter.interaction_type, 0) + 1
-
-    # A global (cross-model) pseudobond group only draws once it's a session
-    # model; register it if it ended up with π pseudobonds, else drop it.
+    try:
+        for row in rows:
+            check_cancel(cancel_check)
+            pb = _draw_interaction(session, structure, row.endpoint1, row.endpoint2,
+                style_for(row.interaction_type), pbg, pi_pbg, marker_holder)
+            row.pseudobond = pb
+            counts[row.interaction_type] = counts.get(row.interaction_type, 0) + 1
+        check_cancel(cancel_check)
+    except BaseException:
+        _discard_graphics(session, [pbg, pi_pbg, *marker_holder.get("ms", {}).values()])
+        if graphics is not None:
+            graphics.clear()
+        raise
     if pi_pbg.num_pseudobonds:
         if pi_pbg.id is None:
             session.models.add([pi_pbg])
-    elif pi_pbg.id is None:
-        pi_pbg.delete()
     else:
-        session.models.close([pi_pbg])
-
-    _log_summary(session, structure, counts, len(rows), unresolved, filtered)
+        if pi_pbg.id is None:
+            pi_pbg.delete()
+        else:
+            session.models.close([pi_pbg])
+        if graphics is not None:
+            graphics[:] = [g for g in graphics if g is not pi_pbg]
+    drawn = sum(row.pseudobond is not None for row in rows)
+    enclosure_groups = {(group.get("center_atom_id"), group.get("assignment_order"))
+                        for row in rows for group in row.extra.get("enclosure_groups", ())}
+    _log_summary(session, structure, counts, drawn, len(rows) - drawn,
+                 max(0, len(projected) - len(rows)), enclosure_groups=len(enclosure_groups))
     return rows
 
 
 def run_trajectory(session, structure, *, exclude_solvent=False, exclude_ions=False,
                    frame_start=0, frame_stop=None, frame_stride=1, processes=1,
                    profile="default", ligand_smiles=None, protonate=False,
-                   protonate_ph=7.4, rule_overrides=None, progress=None):
-    """Analyse Chemur interactions across every selected frame of a trajectory.
-
-    ``structure`` must be a multi-coordset model (an MD trajectory loaded in
-    ChimeraX). The loaded coordsets are serialised to a temporary topology mmCIF +
-    coordinate stack which the engine reads (and parallelises over). Returns a
-    :class:`TrajectoryRun`.
-    """
+                   protonate_ph=7.4, rule_overrides=None, progress=None,
+                   assembly_overrides=None, hydrophobic_enclosure=None, cancel_check=None):
+    """Analyse scene-coordinate frames, keeping topology atom identity stable."""
     import numpy as np
-    from chimerax.core.commands import run
     from chimerax.core.errors import UserError
 
-    try:
-        from chemur.parser import parse_structure
-        from chemur.trajectory import ArrayFrameSource, analyze_trajectory
-    except ImportError as e:
-        # ArrayFrameSource needs only numpy -- there is no optional extra to install
-        # here, so this means the engine itself is absent or broken.
-        raise UserError(
-            "The 'chemur' engine is not available in ChimeraX's Python: %s\n"
-            "Install it with:\n"
-            "    pip install chemur\n"
-            "then restart ChimeraX." % e
-        ) from e
-
+    engine = require_engine()
+    options = analysis_options(engine, profile=profile, rule_overrides=rule_overrides,
+                               hydrophobic_enclosure=hydrophobic_enclosure,
+                               assembly_overrides=assembly_overrides)
+    settings = capture_analysis_options(engine, options, ligand_smiles=ligand_smiles,
+        protonate=protonate, protonate_ph_min=protonate_ph, protonate_ph_max=protonate_ph,
+        add_hydrogens=False, exclude_solvent=exclude_solvent, exclude_ions=exclude_ions,
+        frame_start=frame_start, frame_stop=frame_stop, frame_stride=frame_stride,
+        processes=processes, hydrophobic_enclosure=hydrophobic_enclosure)
+    options.pop("include_raw")  # Trajectories retain assigned interactions only.
+    check_cancel(cancel_check)
     if structure.num_coordsets < 2:
-        raise UserError(
-            "#%s has a single frame; load a trajectory (multiple coordsets) first."
-            % structure.id_string
-        )
-
-    # MD frames already carry explicit hydrogens, so we do NOT run 'addh': the real
-    # per-frame H positions are better than a single static guess.
-    _clear_pi_markers(structure)
-
-    handle = tempfile.NamedTemporaryFile(suffix=".cif", delete=False)
-    handle.close()
-    topo_path = handle.name
+        raise UserError("#%s has a single frame; load a trajectory first." % structure.id_string)
+    topo_path = save_models_mmcif(session, [structure])
     coords_handle = tempfile.NamedTemporaryFile(suffix=".npy", delete=False)
     coords_handle.close()
     coords_path = coords_handle.name
+    stack = None
     try:
-        # Save the topology at the active frame; the coordinate indices below are
-        # built in that same frame so they line up with the written mmCIF.
-        run(session, 'save "%s" models #%s format mmcif' % (topo_path, structure.id_string))
-        topo_atoms, _ = parse_structure(topo_path)
-
-        # Permutation: backend atom i -> column in structure.atoms (ChimeraX order).
+        topo_atoms, _ = engine.parse_structure(topo_path)
+        check_cancel(cancel_check)
         coord_index, name_index = _chimerax_atom_lookup(structure)
         index_of = {atom: i for i, atom in enumerate(structure.atoms)}
-        perm = np.empty(len(topo_atoms), dtype=np.int64)
-        unresolved = 0
-        for i, rec in enumerate(topo_atoms):
+        topo_mapping = {}
+        used_atoms = set()
+        perm = []
+        for rec in topo_atoms:
             atom = _resolve_atom(rec, coord_index, name_index)
-            if atom is None or atom not in index_of:
-                unresolved += 1
-                perm[i] = -1
-            else:
-                perm[i] = index_of[atom]
-        if unresolved:
-            raise UserError(
-                "Could not align %d of %d topology atoms to the trajectory; "
-                "the frames cannot be mapped to the structure." % (unresolved, len(topo_atoms))
-            )
-
-        # Stream every coordset into a (n_frames, n_atoms, 3) memmap in backend order.
+            if atom is None or atom not in index_of or atom in used_atoms:
+                raise UserError("Could not uniquely align topology atom %s to the trajectory." % rec.label)
+            topo_mapping[rec.atom_id] = atom
+            used_atoms.add(atom)
+            perm.append(index_of[atom])
         coordset_ids = list(structure.coordset_ids)
-        stack = np.lib.format.open_memmap(
-            coords_path, mode="w+", dtype=np.float32,
-            shape=(len(coordset_ids), len(topo_atoms), 3),
-        )
+        stack = np.lib.format.open_memmap(coords_path, mode="w+", dtype=np.float32,
+                                         shape=(len(coordset_ids), len(topo_atoms), 3))
         saved_cs = structure.active_coordset_id
         try:
             for fi, cid in enumerate(coordset_ids):
+                check_cancel(cancel_check)
                 structure.active_coordset_id = cid
-                stack[fi] = structure.atoms.coords[perm]
+                stack[fi] = np.asarray([_scene_coord(a) for a in structure.atoms])[perm]
         finally:
-            structure.active_coordset_id = saved_cs
+            if not getattr(structure, "deleted", False):
+                structure.active_coordset_id = saved_cs
         stack.flush()
+        del stack
+        stack = None
 
-        result = analyze_trajectory(
-            ArrayFrameSource(topo_path, coords_path),
-            profile=profile,
-            rule_overrides=rule_overrides or None,
-            ligand_smiles=ligand_smiles or None,
-            protonate=protonate,
-            protonate_ph_min=protonate_ph,
-            protonate_ph_max=protonate_ph,
-            exclude_solvent=exclude_solvent,
-            exclude_ions=exclude_ions,
-            frame_start=frame_start,
-            frame_stop=frame_stop,
-            frame_stride=frame_stride,
-            processes=processes,
-            progress=progress,
-        )
+        def report_progress(done, total):
+            check_cancel(cancel_check)
+            if progress is not None:
+                progress(done, total)
+            check_cancel(cancel_check)
+
+        check_cancel(cancel_check)
+        result = engine.analyze_trajectory(engine.ArrayFrameSource(topo_path, coords_path),
+            ligand_smiles=ligand_smiles or None, protonate=protonate,
+            protonate_ph_min=protonate_ph, protonate_ph_max=protonate_ph,
+            exclude_solvent=exclude_solvent, exclude_ions=exclude_ions,
+            frame_start=frame_start, frame_stop=frame_stop, frame_stride=frame_stride,
+            processes=processes, progress=report_progress, **options)
     finally:
-        for path in (topo_path, coords_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-    # Map the (filtered, renumbered) result atoms back to ChimeraX atoms by
-    # residue/atom name (frame independent), then group atoms per interaction key.
+        if stack is not None:
+            del stack
+        _unlink(topo_path)
+        _unlink(coords_path)
+    check_cancel(cancel_check)
+    # The required engine preserves topology IDs when excluding water/ions.
+    original = {a.atom_id: a for a in topo_atoms}
     id_to_atom = {}
     for rec in result.atoms:
-        atom = name_index.get((rec.chain_id, rec.residue_id, rec.residue_name, rec.name))
-        if atom is not None:
-            id_to_atom[rec.atom_id] = atom
-    comp_of = {rec.atom_id: rec.component_id for rec in result.atoms}
-
-    key_to_atoms = {}
-    key_to_endpoints = {}
+        before = original.get(rec.atom_id)
+        if before is None or (rec.component_id, rec.name, rec.element) != (
+                before.component_id, before.name, before.element):
+            raise UserError("The engine changed trajectory atom identity; update Chemur and retry.")
+        id_to_atom[rec.atom_id] = topo_mapping[rec.atom_id]
+    rec_by_id = {a.atom_id: a for a in result.atoms}
+    features_by_id = {f.feature_id: f for f in engine.perceive_features(result.atoms, result.components)}
+    # Compatibility unions are useful for a whole-trajectory selection. Per-frame
+    # filters MUST use frame_participants/frame_endpoints below.
+    key_to_atoms, key_to_endpoints = {}, {}
     for frame in result.frames:
         for inter in frame.interactions:
             key = result.interaction_key(inter)
-            if key in key_to_atoms:
-                continue
-            atoms = [id_to_atom[a] for a in inter.atom_ids if a in id_to_atom]
-            key_to_atoms[key] = atoms
-            # Group the mapped atoms by their interacting component (endpoint),
-            # preserving component order, for selection-scope tests in the GUI.
-            groups = {}
-            for a in inter.atom_ids:
-                atom = id_to_atom.get(a)
-                if atom is None:
-                    continue
-                groups.setdefault(comp_of.get(a), []).append(atom)
-            key_to_endpoints[key] = list(groups.values())
-
-    # Perceive features once. Feature perception is deterministic on the (frame
-    # independent) topology, so these feature ids match every frame's stored
-    # feature_ids and let us reuse the full _choose_endpoints / _draw_interaction
-    # pipeline to draw any single frame (see draw_frame_interactions).
-    rec_by_id = {rec.atom_id: rec for rec in result.atoms}
-    try:
-        from chemur.features import perceive_features
-        features_by_id = {
-            f.feature_id: f for f in perceive_features(result.atoms, result.components)
-        }
-    except Exception:
-        features_by_id = {}
-
+            values = key_to_atoms.setdefault(key, [])
+            for aid in inter.atom_ids:
+                atom = id_to_atom.get(aid)
+                if atom is not None and atom not in values:
+                    values.append(atom)
+            groups = _interaction_groups(inter, rec_by_id, id_to_atom, features_by_id)
+            existing = key_to_endpoints.setdefault(key, [[] for _ in groups])
+            for index, group in enumerate(groups):
+                if index == len(existing):
+                    existing.append([])
+                for atom in group:
+                    if atom not in existing[index]:
+                        existing[index].append(atom)
     frame_coordset_ids = [coordset_ids[i] for i in result.frame_indices]
-    session.logger.info(
-        "Chemur trajectory: analysed %d frames of #%s; %d distinct interactions."
-        % (result.n_frames, structure.id_string, len(result.occupancy()))
-    )
+    session.logger.info("Chemur trajectory: analysed %d frames of #%s; %d distinct interactions." %
+                       (result.n_frames, structure.id_string, len(result.occupancy())))
     return TrajectoryRun(result, key_to_atoms, key_to_endpoints, structure,
-                         frame_coordset_ids, rec_by_id, features_by_id, id_to_atom)
+                         frame_coordset_ids, rec_by_id, features_by_id, id_to_atom,
+                         analysis_options=settings)
 
 
-def draw_frame_interactions(session, run, frame_index, *, included_types=None):
-    """Draw one analysed frame's interactions as pseudobonds; return the rows.
-
-    The structure should already be at ``frame_index``'s coordset (the GUI's frame
-    slider sets it) so π ring-centre markers land on the right coordinates. Returns
-    a list of :class:`InteractionRow` (empty if the frame wasn't analysed).
-    """
-    frame = next((f for f in run.result.frames if f.frame_index == frame_index), None)
+def draw_frame_interactions(session, run, frame_index, *, included_types=None,
+                            selected_only=False, skip_biopolymer_internal=False,
+                            cancel_check=None):
+    check_cancel(cancel_check)
+    frame = run._frames.get(frame_index)
     if frame is None:
         return []
-    return _draw_interactions(
-        session, run.structure, frame.interactions,
-        run.rec_by_id, run.id_to_atom, run.features_by_id,
-        included_types=included_types,
-    )
+    graphics = []
+    rows = _draw_interactions(session, run.structure, frame.interactions,
+        run.rec_by_id, run.id_to_atom, run.features_by_id, included_types=included_types,
+        selected_only=selected_only, skip_biopolymer_internal=skip_biopolymer_internal,
+        graphics=graphics, cancel_check=cancel_check)
+    _discard_graphics(session, run.graphics)
+    run.graphics[:] = graphics
+    run.rows = rows
+    _track_graphics(session, run.source_models, run.graphics)
+    return rows
 
 
 def _build_ligand_report(result):
-    """One :class:`LigandProtonation` per non-standard residue in ``result``."""
-    input_smiles = result.metadata.get("input_ligand_smiles") or {}
-    charge_by_component = {}
-    for rec in result.atoms:
-        if rec.molecule_type != "ligand":
-            continue
-        charge_by_component[rec.component_id] = (
-            charge_by_component.get(rec.component_id, 0) + (rec.formal_charge or 0)
-        )
-
+    """Report validated/unresolved chemical ligands, including connected assemblies."""
+    metadata = getattr(result, "metadata", {})
+    result_components = getattr(result, "components", ())
+    inputs = metadata.get("input_ligand_smiles") or {}
+    registry = dict(metadata.get("ligand_assemblies") or {})
+    registry.update(metadata.get("chemical_products") or {})
+    for component in result_components:
+        record = component.metadata.get("chemical_product") or component.metadata.get("ligand_assembly")
+        if isinstance(record, dict) and record.get("assembly_id"):
+            registry.setdefault(record["assembly_id"], record)
+    components = {c.component_id: c for c in result_components}
+    atoms = {a.atom_id: a for a in getattr(result, "atoms", ())}
+    covered = set()
     report = []
-    for component in result.components:
-        if component.molecule_type != "ligand":
+    for assembly_id, record in registry.items():
+        member_ids = tuple(record.get("component_ids", ()))
+        members = [components[cid] for cid in member_ids if cid in components]
+        if not members:
+            continue
+        covered.update(member_ids)
+        owner = members[0]
+        failed = record.get("status") != "validated"
+        ids = record.get("atom_ids", ())
+        diagnostics = record.get("diagnostics", ())
+        reason = record.get("reason") or record.get("error") or "; ".join(map(str, diagnostics))
+        if failed and not reason:
+            reason = owner.metadata.get("ignored_reason", "Assembly chemistry is unresolved")
+        # Connected or covalently bound products require a complete assembly
+        # override, not a name-based monomer SMILES edited in a single cell.
+        editable = (len(members) == 1 and not record.get("attachment_component_ids")
+                    and record.get("product_kind", "ligand") == "ligand")
+        report.append(LigandProtonation(
+            assembly_id, "+".join(c.name for c in members), owner.chain_id,
+            ", ".join(c.residue_id for c in members), "failed" if failed else "ok",
+            record.get("smiles"), inputs.get(assembly_id.upper()) or inputs.get(owner.component_id.upper())
+            or (inputs.get(owner.name.upper()) if len(members) == 1 else None),
+            0 if failed else sum(atoms[aid].formal_charge for aid in ids
+                                if aid in atoms and not atoms[aid].metadata.get("ignored_by_template")),
+            reason, assembly_id=assembly_id, component_ids=member_ids, editable=editable,
+            chemistry_source=record.get("chemistry_source"), diagnostics=diagnostics))
+    for component in result_components:
+        if component.molecule_type != "ligand" or component.component_id in covered:
             continue
         meta = component.metadata
         failed = bool(meta.get("ignored_by_template"))
         report.append(LigandProtonation(
-            component_id=component.component_id,
-            name=component.name,
-            chain_id=component.chain_id,
-            residue_id=component.residue_id,
-            status="failed" if failed else "ok",
-            smiles_used=meta.get("smiles"),
-            input_smiles=(
-                input_smiles.get(component.component_id.upper())
-                or input_smiles.get(component.name.upper())
-            ),
-            net_charge=0 if failed else charge_by_component.get(component.component_id, 0),
-            reason=meta.get("ignored_reason", ""),
-        ))
+            component.component_id, component.name, component.chain_id, component.residue_id,
+            "failed" if failed else "ok", meta.get("smiles"),
+            inputs.get(component.component_id.upper()) or inputs.get(component.name.upper()),
+            0 if failed else sum(atoms[aid].formal_charge for aid in component.atom_ids
+                                if aid in atoms and not atoms[aid].metadata.get("ignored_by_template")),
+            meta.get("ignored_reason", ""), chemistry_source=meta.get("template_source")))
     report.sort(key=lambda r: (r.status != "failed", r.chain_id or "", r.residue_id))
     return report
 
@@ -752,95 +997,84 @@ def _is_biopolymer_internal(ep1, ep2):
 
 
 def _geometry_extra(inter):
-    extra = {}
-    for key in _GEOMETRY_METADATA_KEYS:
-        if key in inter.metadata and inter.metadata[key] is not None:
-            extra[key] = inter.metadata[key]
-    return extra
+    return deepcopy(inter.metadata)
 
 
-# Max distance (Å) between a Chemur atom and the ChimeraX atom it resolves to.
-# Far above 3-dp mmCIF rounding noise, far below any real atom separation, so a
-# wrong-copy mapping (which is 10+ Å off) can never pass.
 _COORD_EPS = 0.05
 
 
+def _scene_coord(atom):
+    # The fallback supports lightweight test objects without a model transform.
+    return atom.scene_coord if hasattr(atom, "scene_coord") else atom.coord
+
+
 def _coord_key(coord):
-    """Quantise a coordinate to 1/1000 Å (mmCIF write precision) for hashing."""
-    return (round(coord[0] * 1000), round(coord[1] * 1000), round(coord[2] * 1000))
+    return tuple(round(float(v) * 1000) for v in coord)
 
 
 def _sq_dist(a, b):
-    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+    return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b))
 
 
 def _chimerax_atom_lookup(structure):
-    """Build the indices used to re-attach Chemur atoms to ChimeraX atoms.
-
-    Returns ``(coord_index, name_index)``:
-
-    - ``coord_index`` maps a quantised ``atom.coord`` -> ChimeraX Atom. Coordinates
-      are unique per copy, so this resolves the *correct* protomer/ligand copy even
-      when several share a chain/residue/atom name (the cause of the >10 Å lines on
-      large assemblies like 6PUW).
-    - ``name_index`` maps ``(chain_id, residue_id, residue_name, atom_name)`` ->
-      ChimeraX Atom, kept only as a fallback. Keys mirror Chemur's parser: chain
-      ``name or "_"`` and residue id ``f"{number}{insertion_code}"``.
-
-    ``atom.coord`` is the model-local frame Chemur read from the saved mmCIF (the
-    same frame ``_attach_ring`` already compares ring centres in).
-    """
     return _chimerax_atom_lookup_multi([structure])
 
 
 def _chimerax_atom_lookup_multi(structures):
-    """Like :func:`_chimerax_atom_lookup` but over several structures' atoms.
-
-    Used when an interaction run combines more than one open model (e.g. a
-    receptor plus a docked ligand pose saved into one mmCIF): coordinates are
-    globally unique, so the coord_index still resolves each engine atom to the
-    correct ChimeraX atom across all the supplied structures, and a pose atom can
-    never cross-map to a receptor atom.
-    """
-    coord_index = {}
-    name_index = {}
+    """Keep collision buckets, in the scene frame used by all engine inputs."""
+    coord_index, name_index = {}, {}
     for structure in structures:
         for atom in structure.atoms:
             residue = atom.residue
-            chain = residue.chain_id or "_"
-            icode = (residue.insertion_code or "").strip()
-            residue_id = "%d%s" % (residue.number, icode)
-            coord_index.setdefault(_coord_key(atom.coord), atom)
-            name_index.setdefault((chain, residue_id, residue.name, atom.name), atom)
+            residue_id = "%d%s" % (residue.number, (residue.insertion_code or "").strip())
+            name = (residue.chain_id or "_", residue_id, residue.name, atom.name)
+            coord_index.setdefault(_coord_key(_scene_coord(atom)), []).append(atom)
+            name_index.setdefault(name, []).append(atom)
     return coord_index, name_index
 
 
 def _resolve_atom(rec, coord_index, name_index):
-    """Resolve one Chemur ``AtomRecord`` to a ChimeraX Atom.
-
-    Coordinate match first, name key as a fallback for floating-point boundary
-    misses. Either way the result is accepted only if it actually sits on the
-    Chemur atom (within ``_COORD_EPS``); otherwise we return ``None`` so the
-    endpoint is treated as unresolved rather than drawn to the wrong atom.
-    """
-    atom = coord_index.get(_coord_key(rec.coord))
-    if atom is None:
-        atom = name_index.get((rec.chain_id, rec.residue_id, rec.residue_name, rec.name))
-    if atom is None:
-        return None
-    if _sq_dist(atom.coord, rec.coord) > _COORD_EPS ** 2:
-        return None
-    return atom
+    """Reject ambiguous matches instead of silently choosing a copy or altloc."""
+    candidates = list(coord_index.get(_coord_key(rec.coord), ()))
+    name = (rec.chain_id, rec.residue_id, rec.residue_name, rec.name)
+    for atom in name_index.get(name, ()):
+        if atom not in candidates:
+            candidates.append(atom)
+    candidates = [atom for atom in candidates
+                  if _sq_dist(_scene_coord(atom), rec.coord) <= _COORD_EPS ** 2
+                  and (not hasattr(rec, "element") or not hasattr(atom, "element")
+                       or atom.element.name.upper() == rec.element.upper())]
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else None
+    named = [atom for atom in candidates if atom in name_index.get(name, ())]
+    if len(named) == 1:
+        return named[0]
+    return None
 
 
 def _choose_endpoints(inter, rec_by_id, id_to_atom, features_by_id):
     """Pick the two partner :class:`Endpoint`s for an interaction.
 
-    Prefers two atoms from different Chemur components (the two interacting
-    groups); falls back to the first two distinct mapped atoms. A side whose
-    feature is an aromatic ring gets its ``ring_atoms`` attached so the line can
-    terminate at the ring centroid.
+    Respect the engine's measured salt-bridge pair and the two feature roles of
+    an amide–π contact. Other contacts prefer atoms from different components,
+    attaching ring membership where needed for ring-centroid drawing.
     """
+    if inter.interaction_type == "salt_bridge":
+        atom_ids = inter.metadata.get("distance_atom_ids")
+        if not atom_ids or len(atom_ids) != 2:
+            return None
+        endpoints = []
+        for aid in atom_ids:
+            rec, atom = rec_by_id.get(aid), id_to_atom.get(aid)
+            if rec is None or atom is None:
+                return None
+            endpoints.append(_make_endpoint(rec, atom))
+        if endpoints[0].atom is endpoints[1].atom:
+            return None
+        return tuple(endpoints)
+    if inter.interaction_type == "amide_pi":
+        return _amide_pi_endpoints(inter, rec_by_id, id_to_atom, features_by_id)
+
     mapped = []
     for aid in inter.atom_ids:
         atom = id_to_atom.get(aid)
@@ -873,6 +1107,38 @@ def _choose_endpoints(inter, rec_by_id, id_to_atom, features_by_id):
     return ep1, ep2
 
 
+def _amide_pi_features(inter, features_by_id):
+    features = [features_by_id[fid] for fid in inter.feature_ids if fid in features_by_id]
+    amides = [feat for feat in features if feat.feature_type == "amide"]
+    rings = [feat for feat in features if feat.feature_type == "ring"]
+    return (amides[0], rings[0]) if len(amides) == len(rings) == 1 else None
+
+
+def _amide_pi_endpoints(inter, rec_by_id, id_to_atom, features_by_id):
+    features = _amide_pi_features(inter, features_by_id)
+    if features is None:
+        return None
+    amide, ring = features
+    center_ids = [amide.metadata.get(key) for key in ("carbon_atom_id", "nitrogen_atom_id")]
+    if (len(set(center_ids)) != 2 or any(aid not in amide.atom_ids for aid in center_ids)
+            or len(ring.atom_ids) < 3):
+        return None
+    # Partial centers would produce a line with a different distance from the
+    # engine measurement, so omit a contact whose geometry cannot be mapped.
+    if any(aid not in id_to_atom or aid not in rec_by_id
+           for aid in (*center_ids, *ring.atom_ids)):
+        return None
+    center_atoms = [id_to_atom[aid] for aid in center_ids]
+    if center_atoms[0] is center_atoms[1]:
+        return None
+    ep1 = _make_endpoint(rec_by_id[center_ids[0]], center_atoms[0])
+    ep1.center_atoms = center_atoms
+    ring_rec = rec_by_id[ring.atom_ids[0]]
+    ep2 = _make_endpoint(ring_rec, id_to_atom[ring_rec.atom_id])
+    _attach_ring(ep2, ring_rec, [ring], id_to_atom)
+    return ep1, ep2
+
+
 def _attach_ring(endpoint, rec, ring_feats, id_to_atom):
     """If ``rec`` belongs to one of ``ring_feats``, attach the ring's mapped
     atoms and move the representative atom to the one nearest the ring centre."""
@@ -883,10 +1149,10 @@ def _attach_ring(endpoint, rec, ring_feats, id_to_atom):
         if len(atoms) < 3:
             return
         endpoint.ring_atoms = atoms
-        cx, cy, cz = feat.center
+        cx, cy, cz = (sum(_scene_coord(a)[i] for a in atoms) / len(atoms) for i in range(3))
         endpoint.atom = min(
             atoms,
-            key=lambda a: (a.coord[0] - cx) ** 2 + (a.coord[1] - cy) ** 2 + (a.coord[2] - cz) ** 2,
+            key=lambda a: _sq_dist(_scene_coord(a), (cx, cy, cz)),
         )
         return
 
@@ -910,12 +1176,14 @@ def _clear_pi_markers(structure):
 
 
 def _draw_interaction(session, structure, ep1, ep2, style, pbg, pi_pbg, holder):
-    """Create the pseudobond, routing π (ring) endpoints to centre markers."""
+    """Create the pseudobond, routing geometric centers to marker atoms."""
     node1 = _node_for(ep1, style, holder, session, structure)
     node2 = _node_for(ep2, style, holder, session, structure)
     if node1 is None or node2 is None or node1 is node2:
         return None
-    group = pi_pbg if (ep1.ring_atoms or ep2.ring_atoms) else pbg
+    cross_model = getattr(ep1.atom, "structure", structure) is not getattr(ep2.atom, "structure", structure)
+    group = pi_pbg if (ep1.ring_atoms or ep2.ring_atoms or ep1.center_atoms
+                       or ep2.center_atoms or cross_model) else pbg
     try:
         pb = group.new_pseudobond(node1, node2)
     except Exception:
@@ -926,28 +1194,37 @@ def _draw_interaction(session, structure, ep1, ep2, style, pbg, pi_pbg, holder):
 
 
 def _node_for(endpoint, style, holder, session, structure):
-    """Atom the pseudobond attaches to: the real atom, or a ring-centre marker
-    (one per ring) created in a child MarkerSet that tracks the structure."""
-    if not endpoint.ring_atoms:
+    """Center markers belong to their atoms' model, in that model's local frame."""
+    if not (endpoint.center_atoms or endpoint.ring_atoms):
         return endpoint.atom
-    key = frozenset(endpoint.ring_atoms)
+    return _ring_marker(endpoint, style, holder, session,
+                        getattr(endpoint.atom, "structure", structure), holder.get("ms_name", _PI_MARKERSET_NAME))
+
+
+def _ring_marker(endpoint, style, holder, session, structure, name):
+    atoms = endpoint.center_atoms or endpoint.ring_atoms
+    key = frozenset(atoms)
     markers = holder.setdefault("markers", {})
-    marker = markers.get(key)
-    if marker is not None:
-        return marker
-    ms = holder.get("ms")
+    if key in markers:
+        return markers[key]
+    models = holder.setdefault("ms", {})
+    ms = models.get(structure)
     if ms is None:
         from chimerax.markers import MarkerSet
-        ms = MarkerSet(session, name=_PI_MARKERSET_NAME)
+        ms = MarkerSet(session, name=name)
         structure.add([ms])
-        holder["ms"] = ms
-    n = len(endpoint.ring_atoms)
-    cx = sum(a.coord[0] for a in endpoint.ring_atoms) / n
-    cy = sum(a.coord[1] for a in endpoint.ring_atoms) / n
-    cz = sum(a.coord[2] for a in endpoint.ring_atoms) / n
+        models[structure] = ms
+        if holder.get("graphics") is not None:
+            holder["graphics"].append(ms)
+    center = tuple(sum(_scene_coord(a)[i] for a in atoms) / len(atoms)
+                   for i in range(3))
+    if hasattr(structure, "scene_position"):
+        center = structure.scene_position.inverse() * center
+    else:
+        center = tuple(sum(a.coord[i] for a in atoms) / len(atoms)
+                       for i in range(3))
     from chimerax.atomic import Element
-    marker = ms.create_marker((cx, cy, cz), style["color"], _PI_MARKER_RADIUS)
-    # Re-element away from 'H' so 'delete H' leaves the ring-centre markers intact.
+    marker = ms.create_marker(center, style["color"], _PI_MARKER_RADIUS)
     marker.element = Element.get_element(_PI_MARKER_ELEMENT)
     markers[key] = marker
     return marker
@@ -958,47 +1235,28 @@ def _pose_markerset_name(group_name):
 
 
 def _pose_node_for(endpoint, style, holder, session):
-    """Like :func:`_node_for`, but a ring's centre marker is attached to the
-    endpoint atom's OWN structure — a pose interaction spans two models (receptor
-    + pose), so each ring marker must live on the model whose ring it is."""
-    if not endpoint.ring_atoms:
+    if not (endpoint.center_atoms or endpoint.ring_atoms):
         return endpoint.atom
-    key = frozenset(endpoint.ring_atoms)
-    markers = holder.setdefault("markers", {})
-    marker = markers.get(key)
-    if marker is not None:
-        return marker
-    structure = endpoint.atom.structure
-    ms_by_struct = holder.setdefault("ms", {})
-    ms = ms_by_struct.get(structure)
-    if ms is None:
-        from chimerax.markers import MarkerSet
-        ms = MarkerSet(session, name=holder["ms_name"])
-        structure.add([ms])
-        ms_by_struct[structure] = ms
-    n = len(endpoint.ring_atoms)
-    cx = sum(a.coord[0] for a in endpoint.ring_atoms) / n
-    cy = sum(a.coord[1] for a in endpoint.ring_atoms) / n
-    cz = sum(a.coord[2] for a in endpoint.ring_atoms) / n
-    from chimerax.atomic import Element
-    marker = ms.create_marker((cx, cy, cz), style["color"], _PI_MARKER_RADIUS)
-    marker.element = Element.get_element(_PI_MARKER_ELEMENT)
-    markers[key] = marker
-    return marker
+    return _ring_marker(endpoint, style, holder, session, endpoint.atom.structure,
+                        holder["ms_name"])
 
 
-def draw_pose_rows(session, rows, group_name):
+def draw_pose_rows(session, rows, group_name, *, graphics=None, cancel_check=None):
     """Draw one pose's interactions as pseudobonds in a named GLOBAL group.
 
     ``rows`` are :class:`InteractionRow`s from a pose comparison; their endpoint
     atoms are live ChimeraX atoms spanning the receptor + pose models, so a global
-    (cross-model) pseudobond group is required. Any previous drawing for the same
-    ``group_name`` is cleared first. Returns the group.
+    (cross-model) pseudobond group is required. Each draw owns unique handles;
+    the caller retires the previous drawing after success. Returns the group.
     """
-    clear_pose_group(session, group_name)
-    pbg = session.pb_manager.get_group(group_name, create=True)
-    holder = {"ms_name": _pose_markerset_name(group_name)}
+    check_cancel(cancel_check)
+    unique_name = "%s (%d)" % (group_name, next(_DRAW_IDS))
+    pbg = session.pb_manager.get_group(unique_name, create=True)
+    holder = {"ms_name": _pose_markerset_name(unique_name), "graphics": graphics}
+    if graphics is not None:
+        graphics[:] = [pbg]
     for row in rows:
+        check_cancel(cancel_check)
         try:
             style = style_for(row.interaction_type)
             node1 = _pose_node_for(row.endpoint1, style, holder, session)
@@ -1016,6 +1274,9 @@ def draw_pose_rows(session, rows, group_name):
             session.models.add([pbg])
     elif pbg.id is None:
         pbg.delete()
+    if graphics is not None:
+        _track_graphics(session, tuple({ep.atom.structure for row in rows
+                                      for ep in (row.endpoint1, row.endpoint2)}), graphics)
     return pbg
 
 
@@ -1043,13 +1304,16 @@ def _format_value(value):
     return str(value)
 
 
-def _log_summary(session, structure, counts, drawn, unresolved, filtered):
+def _log_summary(session, structure, counts, drawn, unresolved, filtered, *, enclosure_groups=0):
     logger = session.logger
     if not drawn:
         logger.warning("Chemur: no interactions to show for #%s." % structure.id_string)
         return
     parts = ", ".join("%s: %d" % (k, counts[k]) for k in sorted(counts))
-    msg = "Chemur drew %d interactions on #%s (%s)." % (drawn, structure.id_string, parts)
+    msg = "Chemur drew %d contacts on #%s (%s)." % (drawn, structure.id_string, parts)
+    if enclosure_groups:
+        msg += " %d hydrophobic enclosure group(s), %d enclosure contact(s)." % (
+            enclosure_groups, counts.get("hydrophobic_enclosure", 0))
     if filtered:
         msg += " %d hidden by filters." % filtered
     if unresolved:

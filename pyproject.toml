@@ -4,11 +4,10 @@ build-backend = "chimerax.bundle_builder.cx_pep517"
 
 [project]
 name = "ChimeraX-Chemur"
-# Versioning restarts at 0.1.0 to line up with the chemur engine. Renaming the
-# distribution makes this a different package to pip, so it does NOT upgrade
+# Renaming the distribution makes this a different package to pip, so it does NOT upgrade
 # ChimeraX-ChemeleonX 0.2 in place -- run `toolshed uninstall ChimeraX-ChemeleonX`
 # first (see README).
-version = "0.1.0"
+version = "0.1.1"
 description = "Predict and visualize biomolecular interactions with Chemur"
 authors = [{ name = "Aaron Sweeney", email = "ucbtasw@ucl.ac.uk" }]
 requires-python = ">=3.10"
@@ -17,7 +16,7 @@ requires-python = ">=3.10"
 # there automatically.
 dependencies = [
   "ChimeraX-Core ~=1.8",
-  "chemur >=0.1,<0.2",
+  "chemur >=0.1.1,<0.2",
   # Declared even though chemur already requires it: diagram.py and sdf_io.py
   # import rdkit directly, so the bundle must not rely on it arriving
   # transitively. Floor matches chemur's own pin.

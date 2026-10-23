@@ -3,9 +3,8 @@
 ``pose_compare`` has no ChimeraX/Qt imports at module load (the engine + ChimeraX
 calls live inside ``compute_pose_comparison``), so it loads outside ChimeraX the
 same way ``test_runner_mapping`` loads ``runner``. These cover the residue-column
-ordering, multi-type cell accumulation, sequence-context expansion, residue
-labels, and the two hit-extraction paths (mapped rows vs the engine-result
-fallback).
+ordering, multi-type cell accumulation, sequence-context expansion, full residue
+labels, and native pose projection independent of graphical mapping.
 """
 
 from __future__ import annotations
@@ -60,12 +59,15 @@ class _Row:
 
 
 class _Rec:
-    def __init__(self, atom_id, mt, chain, rid, rname):
+    def __init__(self, atom_id, mt, chain, rid, rname, component_id=None):
         self.atom_id = atom_id
         self.molecule_type = mt
         self.chain_id = chain
         self.residue_id = rid
         self.residue_name = rname
+        self.component_id = component_id or "%s:%s:%s" % (chain, rname, rid)
+        self.element = "C"
+        self.metadata = {}
 
 
 class _Inter:
@@ -78,6 +80,7 @@ class _Result:
     def __init__(self, atoms, interactions):
         self.atoms = atoms
         self.interactions = interactions
+        self.metadata = {}
 
 
 # ----- small helpers -------------------------------------------------------
@@ -148,7 +151,7 @@ def test_build_matrix_accumulates_types_and_rows():
         H("A", 133, "133", "THR", "hbond", real_row),
         H("A", 133, "133", "THR", "hydrophobic", None),
         H("A", 86, "86", "ASP", "salt_bridge", None),
-        H("A", None, "x", "LIG", "hbond", None),   # non-numeric -> dropped
+        H("A", None, "x", "LIG", "hbond", None),
     ]
     hits1 = [
         H("A", 133, "133", "THR", "hbond", None),
@@ -158,16 +161,16 @@ def test_build_matrix_accumulates_types_and_rows():
         [(object(), "p0", True), (object(), "p1", True)], [hits0, hits1])
 
     assert [r.name for r in rows] == ["p0", "p1"]
-    assert cell[(0, ("A", 133))] == {"hbond", "hydrophobic"}
-    assert cell[(0, ("A", 86))] == {"salt_bridge"}
-    assert cell[(1, ("A", 133))] == {"hbond"}
-    assert cell[(1, ("B", 5))] == {"pipi_stack"}
-    assert interacting == {("A", 133), ("A", 86), ("B", 5)}
+    assert cell[(0, ("A", "133"))] == {"hbond", "hydrophobic"}
+    assert cell[(0, ("A", "86"))] == {"salt_bridge"}
+    assert cell[(1, ("A", "133"))] == {"hbond"}
+    assert cell[(1, ("B", "5"))] == {"pipi_stack"}
+    assert interacting == {("A", "133"), ("A", "86"), ("B", "5"), ("A", "x")}
     assert types == ["hbond", "hydrophobic", "pipi_stack", "salt_bridge"]
-    assert resname_by_key[("A", 133)] == "THR"
+    assert resname_by_key[("A", "133")] == "THR"
     # only the one hit carrying a real row lands in cell_rows.
-    assert cell_rows[(0, ("A", 133))] == [real_row]
-    assert (1, ("A", 133)) not in cell_rows
+    assert cell_rows[(0, ("A", "133"))] == [real_row]
+    assert (1, ("A", "133")) not in cell_rows
 
 
 # ----- contiguous sequence-window columns ----------------------------------
@@ -260,6 +263,147 @@ def test_consensus_respects_type_filter():
 def test_consensus_empty_when_no_poses():
     comp = pc.PoseComparison([], {}, {}, [], "r", {}, {}, set(), 0)
     assert pc.compute_consensus(comp) == {}
+
+
+def test_insertion_codes_are_separate_columns_and_keep_labels():
+    hits = [H("A", 133, rid, "THR", "hbond", None) for rid in ("133", "133A", "133B")]
+    rows, cell, cell_rows, names, types, interacting = pc.build_matrix(
+        [(object(), "pose", True)], [hits])
+    comp = pc.PoseComparison(rows, cell, cell_rows, types, "r", {}, names, interacting, 0)
+    assert [column.key for column in comp.columns] == [("A", "133"), ("A", "133A"), ("A", "133B")]
+    assert [column.label1 for column in comp.columns] == ["T133", "T133A", "T133B"]
+
+
+def test_failed_and_unresolved_poses_do_not_dilute_consensus():
+    rows = [pc.PoseRow(object(), "valid", mapping_status="partial"),
+            pc.PoseRow(object(), "failed", analysis_status="failed"),
+            pc.PoseRow(object(), "unresolved", analysis_status="unresolved")]
+    comp = pc.PoseComparison(rows, {(0, ("A", "10")): {"hbond"}}, {}, ["hbond"], "r", {}, {}, set(), 0)
+    assert pc.compute_consensus(comp, threshold=1.0) == {("A", "10"): {"hbond": 1.0}}
+
+
+def test_native_hits_survive_partial_mapping():
+    atoms = [_Rec(1, "protein", "A", "10", "THR"),
+             _Rec(2, "protein", "A", "11A", "ASP"), _Rec(3, "ligand", "B", "1", "LIG")]
+    first, second = _Inter("hbond", [1, 3]), _Inter("salt_bridge", [2, 3])
+    mapped = _Row("hbond", _Endpoint("protein", "A", "10", "THR"),
+                  _Endpoint("ligand", "B", "1", "LIG"))
+    mapped.interaction = first
+    hits = pc._hits_from_result(_Result(atoms, [first, second]), [mapped])
+    assert [(hit.residue_id, hit.itype) for hit in hits] == [("10", "hbond"), ("11A", "salt_bridge")]
+    assert hits[0].row is mapped and hits[1].row is None
+
+
+def test_pose_native_component_filter_excludes_receptor_cofactor_contacts():
+    atoms = [_Rec(1, "protein", "A", "10", "THR"),
+             _Rec(2, "protein", "A", "11", "ASP"),
+             _Rec(3, "ligand", "P", "1", "LIG", "pose"),
+             _Rec(4, "ligand", "R", "1", "HEM", "cofactor")]
+    result = _Result(atoms, [_Inter("hbond", [1, 3]), _Inter("salt_bridge", [2, 4])])
+    # Nothing is graphically mapped; native export provenance identifies the pose.
+    hits = pc._hits_from_result(result, pose_component_ids=("pose",))
+    assert [(hit.residue_id, hit.itype) for hit in hits] == [("10", "hbond")]
+    assert pc._hits_from_result(result, pose_component_ids=()) == []
+
+
+def test_unresolved_receptor_cofactor_does_not_invalidate_resolved_pose():
+    result = _Result([_Rec(1, "ligand", "P", "1", "LIG", "pose")], [])
+    result.metadata["skipped_ligands"] = {"cofactor": "no template"}
+    assert pc._pose_analysis_status(result, ("pose",)) == ("success", "")
+    result.metadata["skipped_ligands"]["pose"] = "no template"
+    assert pc._pose_analysis_status(result, ("pose",))[0] == "unresolved"
+
+
+@pytest.mark.parametrize("component_ids", [None, (), ("missing",)])
+def test_absent_or_unidentified_pose_is_unresolved_not_valid_zero(component_ids):
+    result = _Result([_Rec(1, "ligand", "R", "1", "HEM", "cofactor")], [])
+    status, diagnostic = pc._pose_analysis_status(result, component_ids)
+    assert status == "unresolved" and diagnostic
+
+
+def test_valid_zero_contact_pose_counts_in_consensus_but_absent_and_failed_do_not(monkeypatch):
+    runner, support = _load("runner"), _load("engine_support")
+    monkeypatch.setattr(support, "require_engine", lambda: None)
+    class Pose:
+        def __init__(self, name):
+            self.name = name
+            self.id_string = name
+    poses = [Pose(name) for name in ("contact", "zero", "absent", "failed")]
+    protein = _Rec(1, "protein", "A", "10", "THR")
+    ligand = _Rec(2, "ligand", "P", "1", "LIG", "pose")
+    def run(_session, pose, _receptor, **_kwargs):
+        if pose.name == "failed":
+            raise ValueError("analysis failed")
+        atoms = [protein] if pose.name == "absent" else [protein, ligand]
+        interactions = [_Inter("hbond", [1, 2])] if pose.name == "contact" else []
+        return types.SimpleNamespace(result=_Result(atoms, interactions), rows=[],
+            fully_mapped=False, mapping_status="unavailable",
+            pose_component_ids=() if pose.name == "absent" else ("pose",))
+    monkeypatch.setattr(runner, "run_pose_interactions", run)
+    session = types.SimpleNamespace(logger=types.SimpleNamespace(warning=lambda _msg: None))
+    comparison = pc.compute_pose_comparison(session, None, poses, {})
+    assert [row.analysis_status for row in comparison.rows] == ["success", "success", "unresolved", "failed"]
+    assert pc.compute_consensus(comparison, threshold=0.5) == {("A", "10"): {"hbond": 0.5}}
+    assert set(comparison.native_runs) == set(poses[:3])
+
+
+def test_native_enclosure_projection_never_connects_shell_neighbors():
+    from chemur.models import AssignedInteraction
+    atoms = [_Rec(1, "protein", "A", "10", "LEU"),
+             _Rec(2, "ligand", "B", "1", "LIG"),
+             _Rec(3, "protein", "A", "11", "VAL")]
+    group = AssignedInteraction("hydrophobic_enclosure", (1, 2, 3), (1, 2, 3),
+                                ("p1", "lig", "p2"), 3.9, 135, "inter", 1,
+                                metadata={"center_atom_id": 1, "legs": [
+                                    {"atom_ids": [1, 2], "feature_ids": [1, 2], "component_ids": ["p1", "lig"], "distance": 3.5},
+                                    {"atom_ids": [1, 3], "feature_ids": [1, 3], "component_ids": ["p1", "p2"], "distance": 3.9},
+                                ]})
+    hits = pc._hits_from_result(_Result(atoms, [group]))
+    assert [(hit.residue_id, hit.itype) for hit in hits] == [("10", "hydrophobic_enclosure")]
+
+
+def test_pruning_pose_preserves_native_runs_and_reindexes_cells():
+    receptor, first, second = object(), object(), object()
+    rows = [pc.PoseRow(first, "first", True), pc.PoseRow(second, "second", True)]
+    comp = pc.PoseComparison(rows,
+        {(0, ("A", "10")): {"hbond"}, (1, ("A", "11A")): {"hydrophobic"}},
+        {(1, ("A", "11A")): ["mapped-row"]}, ["hbond", "hydrophobic"], "r", {},
+        {("A", "10"): "THR", ("A", "11A"): "LEU"}, {("A", "10"), ("A", "11A")}, 0,
+        receptor=receptor, native_runs={first: "first-native", second: "second-native"})
+    assert comp.prune_models([first])
+    assert comp.source_models == (receptor, second)
+    assert comp.index_for_pose(first) is None and comp.index_for_pose(second) == 0
+    assert comp.cell == {(0, ("A", "11A")): {"hydrophobic"}}
+    assert comp.cell_rows == {(0, ("A", "11A")): ["mapped-row"]}
+    assert comp.native_runs == {second: "second-native"}
+    assert [column.residue_id for column in comp.columns] == ["11A"]
+    assert not comp.prune_models([receptor])
+
+
+def test_progress_cancellation_does_not_access_next_pose(monkeypatch):
+    runner = _load("runner")
+    support = _load("engine_support")
+    monkeypatch.setattr(support, "require_engine", lambda: None)
+    class Pose:
+        name = "pose"
+        id_string = "1"
+    first, second = Pose(), Pose()
+    calls = []
+    result = _Result([], [])
+    result.metadata = {}
+    def run(_session, pose, _receptor, **kwargs):
+        calls.append(pose)
+        return types.SimpleNamespace(result=result, rows=[], fully_mapped=False, mapping_status="unavailable")
+    monkeypatch.setattr(runner, "run_pose_interactions", run)
+    cancelled = [False]
+    def cancel_check():
+        if cancelled[0]:
+            raise pc.RunCancelled("closed")
+    session = types.SimpleNamespace(logger=types.SimpleNamespace(warning=lambda _msg: None))
+    with pytest.raises(pc.RunCancelled):
+        pc.compute_pose_comparison(session, None, [first, second], {},
+                                   progress=lambda *_: cancelled.__setitem__(0, True), cancel_check=cancel_check)
+    assert calls == [first]
 
 
 if __name__ == "__main__":  # pragma: no cover

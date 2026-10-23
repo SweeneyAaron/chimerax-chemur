@@ -25,6 +25,7 @@ INTERACTION_STYLE = {
     "halogen_pi":         {"color": (120, 230, 200, 255), "radius": 0.12, "dashes": 8},
     "ch_pi":              {"color": (200, 200, 120, 255), "radius": 0.10, "dashes": 8},
     "hydrophobic":        {"color": (210, 210, 210, 255), "radius": 0.08, "dashes": 10},
+    "hydrophobic_enclosure": {"color": (165, 110, 45, 255), "radius": 0.12, "dashes": 6},
     # Types the chemur engine added after the initial release. Styled to the same
     # conventions as the rest of the table: sigma-hole donors get radius 0.14 /
     # 4 dashes like halogen_bond, their pi variants a lighter tint at 0.12 / 8,

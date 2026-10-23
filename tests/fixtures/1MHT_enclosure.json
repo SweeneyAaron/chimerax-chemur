@@ -1,0 +1,1943 @@
+{
+  "atoms": [
+    {
+      "acceptor_capacity": 0,
+      "atom_id": 659,
+      "bonds": [
+        658,
+        661
+      ],
+      "carbon_donor_capacity": 1,
+      "chain_id": "A",
+      "chalcogen_donor_capacity": 0,
+      "component_id": "A:PHE:18",
+      "coord": [
+        -12.584,
+        28.748,
+        85.635
+      ],
+      "donor_capacity": 0,
+      "element": "C",
+      "formal_charge": 0,
+      "halogen_donor_capacity": 0,
+      "hydrogen_count": 0,
+      "is_aromatic": true,
+      "is_hydrophobe": true,
+      "metadata": {
+        "source_altloc": "",
+        "source_entity_id": "3",
+        "source_insertion_code": "",
+        "source_label_asym_id": "C",
+        "source_label_seq_id": 18,
+        "source_model": 1
+      },
+      "molecule_type": "protein",
+      "name": "CD1",
+      "residue_id": "18",
+      "residue_name": "PHE",
+      "serial": 660,
+      "sigma_hole_activated": false,
+      "tetrel_donor_capacity": 0,
+      "weak_hbond_activated": false
+    },
+    {
+      "acceptor_capacity": 0,
+      "atom_id": 824,
+      "bonds": [
+        823,
+        825,
+        826
+      ],
+      "carbon_donor_capacity": 1,
+      "chain_id": "A",
+      "chalcogen_donor_capacity": 0,
+      "component_id": "A:TRP:41",
+      "coord": [
+        -14.396,
+        24.803,
+        91.617
+      ],
+      "donor_capacity": 0,
+      "element": "C",
+      "formal_charge": 0,
+      "halogen_donor_capacity": 0,
+      "hydrogen_count": 0,
+      "is_aromatic": true,
+      "is_hydrophobe": true,
+      "metadata": {
+        "source_altloc": "",
+        "source_entity_id": "3",
+        "source_insertion_code": "",
+        "source_label_asym_id": "C",
+        "source_label_seq_id": 41,
+        "source_model": 1
+      },
+      "molecule_type": "protein",
+      "name": "CG",
+      "residue_id": "41",
+      "residue_name": "TRP",
+      "serial": 825,
+      "sigma_hole_activated": false,
+      "tetrel_donor_capacity": 0,
+      "weak_hbond_activated": false
+    },
+    {
+      "acceptor_capacity": 0,
+      "atom_id": 825,
+      "bonds": [
+        824,
+        827
+      ],
+      "carbon_donor_capacity": 1,
+      "chain_id": "A",
+      "chalcogen_donor_capacity": 0,
+      "component_id": "A:TRP:41",
+      "coord": [
+        -15.347,
+        25.741,
+        91.339
+      ],
+      "donor_capacity": 0,
+      "element": "C",
+      "formal_charge": 0,
+      "halogen_donor_capacity": 0,
+      "hydrogen_count": 0,
+      "is_aromatic": true,
+      "is_hydrophobe": true,
+      "metadata": {
+        "source_altloc": "",
+        "source_entity_id": "3",
+        "source_insertion_code": "",
+        "source_label_asym_id": "C",
+        "source_label_seq_id": 41,
+        "source_model": 1
+      },
+      "molecule_type": "protein",
+      "name": "CD1",
+      "residue_id": "41",
+      "residue_name": "TRP",
+      "serial": 826,
+      "sigma_hole_activated": false,
+      "tetrel_donor_capacity": 0,
+      "weak_hbond_activated": true
+    },
+    {
+      "acceptor_capacity": 0,
+      "atom_id": 828,
+      "bonds": [
+        826,
+        827,
+        830
+      ],
+      "carbon_donor_capacity": 1,
+      "chain_id": "A",
+      "chalcogen_donor_capacity": 0,
+      "component_id": "A:TRP:41",
+      "coord": [
+        -13.879,
+        26.77,
+        92.671
+      ],
+      "donor_capacity": 0,
+      "element": "C",
+      "formal_charge": 0,
+      "halogen_donor_capacity": 0,
+      "hydrogen_count": 0,
+      "is_aromatic": true,
+      "is_hydrophobe": true,
+      "metadata": {
+        "source_altloc": "",
+        "source_entity_id": "3",
+        "source_insertion_code": "",
+        "source_label_asym_id": "C",
+        "source_label_seq_id": 41,
+        "source_model": 1
+      },
+      "molecule_type": "protein",
+      "name": "CE2",
+      "residue_id": "41",
+      "residue_name": "TRP",
+      "serial": 829,
+      "sigma_hole_activated": false,
+      "tetrel_donor_capacity": 0,
+      "weak_hbond_activated": true
+    },
+    {
+      "acceptor_capacity": 0,
+      "atom_id": 3143,
+      "bonds": [
+        3134,
+        3137,
+        3142
+      ],
+      "carbon_donor_capacity": 1,
+      "chain_id": "A",
+      "chalcogen_donor_capacity": 0,
+      "component_id": "A:SAH:328",
+      "coord": [
+        -13.717,
+        27.063,
+        88.808
+      ],
+      "donor_capacity": 0,
+      "element": "C",
+      "formal_charge": 0,
+      "halogen_donor_capacity": 0,
+      "hydrogen_count": 0,
+      "is_aromatic": true,
+      "is_hydrophobe": true,
+      "metadata": {
+        "acceptor_source": "rdkit_lipinski",
+        "chemistry_source": "linked_templates",
+        "ligand_assembly_id": "A:SAH:328",
+        "source_altloc": "",
+        "source_entity_id": "4",
+        "source_insertion_code": "",
+        "source_label_asym_id": "D",
+        "source_label_seq_id": null,
+        "source_model": 1,
+        "structure_hydrogen_count": 0,
+        "template_hydrogen_count": 0
+      },
+      "molecule_type": "ligand",
+      "name": "C4",
+      "residue_id": "328",
+      "residue_name": "SAH",
+      "serial": 3144,
+      "sigma_hole_activated": false,
+      "tetrel_donor_capacity": 0,
+      "weak_hbond_activated": true
+    }
+  ],
+  "components": [
+    {
+      "atom_ids": [
+        653,
+        654,
+        655,
+        656,
+        657,
+        658,
+        659,
+        660,
+        661,
+        662,
+        663
+      ],
+      "chain_id": "A",
+      "component_id": "A:PHE:18",
+      "metadata": {
+        "chemical_template": {
+          "atoms": {
+            "C": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CA": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "S"
+            },
+            "CB": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CD1": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CD2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CE1": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CE2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CG": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CZ": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HA": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HB2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HB3": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HD1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HD2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HE1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HE2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HXT": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HZ": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N": {
+              "aromatic": false,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "O": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "OXT": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            }
+          },
+          "bonds": [
+            {
+              "atom1": "N",
+              "atom2": "CA",
+              "order": 1.0
+            },
+            {
+              "atom1": "N",
+              "atom2": "H",
+              "order": 1.0
+            },
+            {
+              "atom1": "N",
+              "atom2": "H2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "C",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "CB",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "HA",
+              "order": 1.0
+            },
+            {
+              "atom1": "C",
+              "atom2": "O",
+              "order": 2.0
+            },
+            {
+              "atom1": "C",
+              "atom2": "OXT",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "CG",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "HB2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "HB3",
+              "order": 1.0
+            },
+            {
+              "atom1": "CG",
+              "atom2": "CD1",
+              "order": 1.5
+            },
+            {
+              "atom1": "CG",
+              "atom2": "CD2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CD1",
+              "atom2": "CE1",
+              "order": 1.5
+            },
+            {
+              "atom1": "CD1",
+              "atom2": "HD1",
+              "order": 1.0
+            },
+            {
+              "atom1": "CD2",
+              "atom2": "CE2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CD2",
+              "atom2": "HD2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CE1",
+              "atom2": "CZ",
+              "order": 1.5
+            },
+            {
+              "atom1": "CE1",
+              "atom2": "HE1",
+              "order": 1.0
+            },
+            {
+              "atom1": "CE2",
+              "atom2": "CZ",
+              "order": 1.5
+            },
+            {
+              "atom1": "CE2",
+              "atom2": "HE2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CZ",
+              "atom2": "HZ",
+              "order": 1.0
+            },
+            {
+              "atom1": "OXT",
+              "atom2": "HXT",
+              "order": 1.0
+            }
+          ],
+          "source": "embedded_cif"
+        }
+      },
+      "molecule_type": "protein",
+      "name": "PHE",
+      "residue_id": "18"
+    },
+    {
+      "atom_ids": [
+        819,
+        820,
+        821,
+        822,
+        823,
+        824,
+        825,
+        826,
+        827,
+        828,
+        829,
+        830,
+        831,
+        832
+      ],
+      "chain_id": "A",
+      "component_id": "A:TRP:41",
+      "metadata": {
+        "chemical_template": {
+          "atoms": {
+            "C": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CA": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "S"
+            },
+            "CB": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CD1": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CD2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CE2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CE3": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CG": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CH2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CZ2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CZ3": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HA": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HB2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HB3": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HD1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HE1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HE3": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HH2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HXT": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HZ2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HZ3": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N": {
+              "aromatic": false,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "NE1": {
+              "aromatic": true,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "O": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "OXT": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            }
+          },
+          "bonds": [
+            {
+              "atom1": "N",
+              "atom2": "CA",
+              "order": 1.0
+            },
+            {
+              "atom1": "N",
+              "atom2": "H",
+              "order": 1.0
+            },
+            {
+              "atom1": "N",
+              "atom2": "H2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "C",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "CB",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "HA",
+              "order": 1.0
+            },
+            {
+              "atom1": "C",
+              "atom2": "O",
+              "order": 2.0
+            },
+            {
+              "atom1": "C",
+              "atom2": "OXT",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "CG",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "HB2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "HB3",
+              "order": 1.0
+            },
+            {
+              "atom1": "CG",
+              "atom2": "CD1",
+              "order": 1.5
+            },
+            {
+              "atom1": "CG",
+              "atom2": "CD2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CD1",
+              "atom2": "NE1",
+              "order": 1.5
+            },
+            {
+              "atom1": "CD1",
+              "atom2": "HD1",
+              "order": 1.0
+            },
+            {
+              "atom1": "CD2",
+              "atom2": "CE2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CD2",
+              "atom2": "CE3",
+              "order": 1.5
+            },
+            {
+              "atom1": "NE1",
+              "atom2": "CE2",
+              "order": 1.5
+            },
+            {
+              "atom1": "NE1",
+              "atom2": "HE1",
+              "order": 1.0
+            },
+            {
+              "atom1": "CE2",
+              "atom2": "CZ2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CE3",
+              "atom2": "CZ3",
+              "order": 1.5
+            },
+            {
+              "atom1": "CE3",
+              "atom2": "HE3",
+              "order": 1.0
+            },
+            {
+              "atom1": "CZ2",
+              "atom2": "CH2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CZ2",
+              "atom2": "HZ2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CZ3",
+              "atom2": "CH2",
+              "order": 1.5
+            },
+            {
+              "atom1": "CZ3",
+              "atom2": "HZ3",
+              "order": 1.0
+            },
+            {
+              "atom1": "CH2",
+              "atom2": "HH2",
+              "order": 1.0
+            },
+            {
+              "atom1": "OXT",
+              "atom2": "HXT",
+              "order": 1.0
+            }
+          ],
+          "source": "embedded_cif"
+        }
+      },
+      "molecule_type": "protein",
+      "name": "TRP",
+      "residue_id": "41"
+    },
+    {
+      "atom_ids": [
+        3118,
+        3119,
+        3120,
+        3121,
+        3122,
+        3123,
+        3124,
+        3125,
+        3126,
+        3127,
+        3128,
+        3129,
+        3130,
+        3131,
+        3132,
+        3133,
+        3134,
+        3135,
+        3136,
+        3137,
+        3138,
+        3139,
+        3140,
+        3141,
+        3142,
+        3143
+      ],
+      "chain_id": "A",
+      "component_id": "A:SAH:328",
+      "metadata": {
+        "chemical_template": {
+          "atoms": {
+            "C": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "C1'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "R"
+            },
+            "C2": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "C2'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "R"
+            },
+            "C3'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "S"
+            },
+            "C4": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "C4'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "S"
+            },
+            "C5": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "C5'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "C6": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "C8": {
+              "aromatic": true,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CA": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "S"
+            },
+            "CB": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "CG": {
+              "aromatic": false,
+              "charge": null,
+              "element": "C",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H1'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H2'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H3'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H4'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H5'1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H5'2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "H8": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HA": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HB1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HB2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HG1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HG2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HN1": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HN2": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HN61": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HN62": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HO2'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HO3'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "HXT": {
+              "aromatic": false,
+              "charge": null,
+              "element": "H",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N": {
+              "aromatic": false,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N1": {
+              "aromatic": true,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N3": {
+              "aromatic": true,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N6": {
+              "aromatic": false,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N7": {
+              "aromatic": true,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "N9": {
+              "aromatic": true,
+              "charge": null,
+              "element": "N",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "O": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "O2'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "O3'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "O4'": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "OXT": {
+              "aromatic": false,
+              "charge": null,
+              "element": "O",
+              "leaving": false,
+              "stereo": "N"
+            },
+            "SD": {
+              "aromatic": false,
+              "charge": null,
+              "element": "S",
+              "leaving": false,
+              "stereo": "N"
+            }
+          },
+          "bonds": [
+            {
+              "atom1": "N",
+              "atom2": "CA",
+              "order": 1.0
+            },
+            {
+              "atom1": "N",
+              "atom2": "HN1",
+              "order": 1.0
+            },
+            {
+              "atom1": "N",
+              "atom2": "HN2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "CB",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "C",
+              "order": 1.0
+            },
+            {
+              "atom1": "CA",
+              "atom2": "HA",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "CG",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "HB1",
+              "order": 1.0
+            },
+            {
+              "atom1": "CB",
+              "atom2": "HB2",
+              "order": 1.0
+            },
+            {
+              "atom1": "CG",
+              "atom2": "SD",
+              "order": 1.0
+            },
+            {
+              "atom1": "CG",
+              "atom2": "HG1",
+              "order": 1.0
+            },
+            {
+              "atom1": "CG",
+              "atom2": "HG2",
+              "order": 1.0
+            },
+            {
+              "atom1": "SD",
+              "atom2": "C5'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C",
+              "atom2": "O",
+              "order": 2.0
+            },
+            {
+              "atom1": "C",
+              "atom2": "OXT",
+              "order": 1.0
+            },
+            {
+              "atom1": "OXT",
+              "atom2": "HXT",
+              "order": 1.0
+            },
+            {
+              "atom1": "C5'",
+              "atom2": "C4'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C5'",
+              "atom2": "H5'1",
+              "order": 1.0
+            },
+            {
+              "atom1": "C5'",
+              "atom2": "H5'2",
+              "order": 1.0
+            },
+            {
+              "atom1": "C4'",
+              "atom2": "O4'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C4'",
+              "atom2": "C3'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C4'",
+              "atom2": "H4'",
+              "order": 1.0
+            },
+            {
+              "atom1": "O4'",
+              "atom2": "C1'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C3'",
+              "atom2": "O3'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C3'",
+              "atom2": "C2'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C3'",
+              "atom2": "H3'",
+              "order": 1.0
+            },
+            {
+              "atom1": "O3'",
+              "atom2": "HO3'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C2'",
+              "atom2": "O2'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C2'",
+              "atom2": "C1'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C2'",
+              "atom2": "H2'",
+              "order": 1.0
+            },
+            {
+              "atom1": "O2'",
+              "atom2": "HO2'",
+              "order": 1.0
+            },
+            {
+              "atom1": "C1'",
+              "atom2": "N9",
+              "order": 1.0
+            },
+            {
+              "atom1": "C1'",
+              "atom2": "H1'",
+              "order": 1.0
+            },
+            {
+              "atom1": "N9",
+              "atom2": "C8",
+              "order": 1.5
+            },
+            {
+              "atom1": "N9",
+              "atom2": "C4",
+              "order": 1.5
+            },
+            {
+              "atom1": "C8",
+              "atom2": "N7",
+              "order": 1.5
+            },
+            {
+              "atom1": "C8",
+              "atom2": "H8",
+              "order": 1.0
+            },
+            {
+              "atom1": "N7",
+              "atom2": "C5",
+              "order": 1.5
+            },
+            {
+              "atom1": "C5",
+              "atom2": "C6",
+              "order": 1.5
+            },
+            {
+              "atom1": "C5",
+              "atom2": "C4",
+              "order": 1.5
+            },
+            {
+              "atom1": "C6",
+              "atom2": "N6",
+              "order": 1.0
+            },
+            {
+              "atom1": "C6",
+              "atom2": "N1",
+              "order": 1.5
+            },
+            {
+              "atom1": "N6",
+              "atom2": "HN61",
+              "order": 1.0
+            },
+            {
+              "atom1": "N6",
+              "atom2": "HN62",
+              "order": 1.0
+            },
+            {
+              "atom1": "N1",
+              "atom2": "C2",
+              "order": 1.5
+            },
+            {
+              "atom1": "C2",
+              "atom2": "N3",
+              "order": 1.5
+            },
+            {
+              "atom1": "C2",
+              "atom2": "H2",
+              "order": 1.0
+            },
+            {
+              "atom1": "N3",
+              "atom2": "C4",
+              "order": 1.5
+            }
+          ],
+          "source": "embedded_cif"
+        },
+        "ligand_assembly": {
+          "assembly_id": "A:SAH:328",
+          "atom_ids": [
+            3118,
+            3119,
+            3120,
+            3121,
+            3122,
+            3123,
+            3124,
+            3125,
+            3126,
+            3127,
+            3128,
+            3129,
+            3130,
+            3131,
+            3132,
+            3133,
+            3134,
+            3135,
+            3136,
+            3137,
+            3138,
+            3139,
+            3140,
+            3141,
+            3142,
+            3143
+          ],
+          "attachment_component_ids": [],
+          "bond_orders": [
+            {
+              "atom_id_1": 3118,
+              "atom_id_2": 3119,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3119,
+              "atom_id_2": 3120,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3119,
+              "atom_id_2": 3123,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3120,
+              "atom_id_2": 3121,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3121,
+              "atom_id_2": 3122,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3122,
+              "atom_id_2": 3126,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3123,
+              "atom_id_2": 3124,
+              "order": 2.0
+            },
+            {
+              "atom_id_1": 3123,
+              "atom_id_2": 3125,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3126,
+              "atom_id_2": 3127,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3127,
+              "atom_id_2": 3128,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3127,
+              "atom_id_2": 3129,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3128,
+              "atom_id_2": 3133,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3129,
+              "atom_id_2": 3130,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3129,
+              "atom_id_2": 3131,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3131,
+              "atom_id_2": 3132,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3131,
+              "atom_id_2": 3133,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3133,
+              "atom_id_2": 3134,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3134,
+              "atom_id_2": 3135,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3134,
+              "atom_id_2": 3143,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3135,
+              "atom_id_2": 3136,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3136,
+              "atom_id_2": 3137,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3137,
+              "atom_id_2": 3138,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3137,
+              "atom_id_2": 3143,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3138,
+              "atom_id_2": 3139,
+              "order": 1.0
+            },
+            {
+              "atom_id_1": 3138,
+              "atom_id_2": 3140,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3140,
+              "atom_id_2": 3141,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3141,
+              "atom_id_2": 3142,
+              "order": 1.5
+            },
+            {
+              "atom_id_1": 3142,
+              "atom_id_2": 3143,
+              "order": 1.5
+            }
+          ],
+          "boundary_atom_ids": [],
+          "chemistry_source": "linked_templates",
+          "component_ids": [
+            "A:SAH:328"
+          ],
+          "context_atom_ids": [],
+          "diagnostics": [],
+          "leaving_hydrogen_atom_ids": [],
+          "links": [],
+          "smiles": "C([C@H](CCSC[C@@H]1[C@@H](O)[C@@H](O)[C@H](n2c3c(c(N)ncn3)nc2)O1)N)(=O)O",
+          "status": "validated",
+          "template_amides": [],
+          "template_carbonyls": [
+            [
+              3123,
+              3124
+            ]
+          ],
+          "template_mapping": {
+            "0": 3123,
+            "1": 3119,
+            "10": 3132,
+            "11": 3133,
+            "12": 3134,
+            "13": 3143,
+            "14": 3137,
+            "15": 3138,
+            "16": 3139,
+            "17": 3140,
+            "18": 3141,
+            "19": 3142,
+            "2": 3120,
+            "20": 3136,
+            "21": 3135,
+            "22": 3128,
+            "23": 3118,
+            "24": 3124,
+            "25": 3125,
+            "3": 3121,
+            "4": 3122,
+            "5": 3126,
+            "6": 3127,
+            "7": 3129,
+            "8": 3130,
+            "9": 3131
+          },
+          "template_rings": [
+            [
+              3141,
+              3142,
+              3143,
+              3137,
+              3138,
+              3140
+            ],
+            [
+              3131,
+              3129,
+              3127,
+              3128,
+              3133
+            ],
+            [
+              3135,
+              3134,
+              3143,
+              3137,
+              3136
+            ]
+          ],
+          "updated_polymer_atom_ids": []
+        },
+        "ligand_assembly_id": "A:SAH:328"
+      },
+      "molecule_type": "ligand",
+      "name": "SAH",
+      "residue_id": "328"
+    }
+  ],
+  "features": [
+    {
+      "atom_ids": [
+        659
+      ],
+      "capacity": 0,
+      "center": [
+        -12.584,
+        28.748,
+        85.635
+      ],
+      "component_id": "A:PHE:18",
+      "feature_id": 923,
+      "feature_type": "hydrophobe",
+      "metadata": {
+        "component_ids": [
+          "A:PHE:18"
+        ]
+      },
+      "normal": null
+    },
+    {
+      "atom_ids": [
+        824
+      ],
+      "capacity": 0,
+      "center": [
+        -14.396,
+        24.803,
+        91.617
+      ],
+      "component_id": "A:TRP:41",
+      "feature_id": 1222,
+      "feature_type": "hydrophobe",
+      "metadata": {
+        "component_ids": [
+          "A:TRP:41"
+        ]
+      },
+      "normal": null
+    },
+    {
+      "atom_ids": [
+        825
+      ],
+      "capacity": 0,
+      "center": [
+        -15.347,
+        25.741,
+        91.339
+      ],
+      "component_id": "A:TRP:41",
+      "feature_id": 1224,
+      "feature_type": "hydrophobe",
+      "metadata": {
+        "component_ids": [
+          "A:TRP:41"
+        ]
+      },
+      "normal": null
+    },
+    {
+      "atom_ids": [
+        828
+      ],
+      "capacity": 0,
+      "center": [
+        -13.879,
+        26.77,
+        92.671
+      ],
+      "component_id": "A:TRP:41",
+      "feature_id": 1229,
+      "feature_type": "hydrophobe",
+      "metadata": {
+        "component_ids": [
+          "A:TRP:41"
+        ]
+      },
+      "normal": null
+    },
+    {
+      "atom_ids": [
+        3143
+      ],
+      "capacity": 0,
+      "center": [
+        -13.717,
+        27.063,
+        88.808
+      ],
+      "component_id": "A:SAH:328",
+      "feature_id": 5421,
+      "feature_type": "hydrophobe",
+      "metadata": {
+        "component_ids": [
+          "A:SAH:328"
+        ],
+        "ligand_assembly_id": "A:SAH:328"
+      },
+      "normal": null
+    }
+  ],
+  "interactions": [
+    {
+      "angle": null,
+      "assignment_order": 142,
+      "atom_ids": [
+        659,
+        824,
+        825,
+        828,
+        3143
+      ],
+      "component_ids": [
+        "A:PHE:18",
+        "A:SAH:328",
+        "A:TRP:41"
+      ],
+      "distance": 3.8774813990527406,
+      "feature_ids": [
+        923,
+        1222,
+        1224,
+        1229,
+        5421
+      ],
+      "interaction_type": "hydrophobic_enclosure",
+      "metadata": {
+        "center_atom_id": 3143,
+        "interaction_subtype": "hydrophobic_enclosure",
+        "legs": [
+          {
+            "atom_ids": [
+              659,
+              3143
+            ],
+            "component_ids": [
+              "A:PHE:18",
+              "A:SAH:328"
+            ],
+            "distance": 3.767073532597953,
+            "feature_ids": [
+              923,
+              5421
+            ]
+          },
+          {
+            "atom_ids": [
+              824,
+              3143
+            ],
+            "component_ids": [
+              "A:TRP:41",
+              "A:SAH:328"
+            ],
+            "distance": 3.6686676055483654,
+            "feature_ids": [
+              1222,
+              5421
+            ]
+          },
+          {
+            "atom_ids": [
+              825,
+              3143
+            ],
+            "component_ids": [
+              "A:TRP:41",
+              "A:SAH:328"
+            ],
+            "distance": 3.287939324257665,
+            "feature_ids": [
+              1224,
+              5421
+            ]
+          },
+          {
+            "atom_ids": [
+              828,
+              3143
+            ],
+            "component_ids": [
+              "A:TRP:41",
+              "A:SAH:328"
+            ],
+            "distance": 3.8774813990527406,
+            "feature_ids": [
+              1229,
+              5421
+            ]
+          }
+        ],
+        "neighbor_atom_ids": [
+          659,
+          824,
+          825,
+          828
+        ]
+      },
+      "offset": null,
+      "priority": 135,
+      "resource_demands": [],
+      "stage": "inter"
+    }
+  ],
+  "metadata": {
+    "fixture_source": "https://www.rcsb.org/structure/1MHT",
+    "preparation": "Default 4 A profile, no added hydrogens; extracted confirmed ligand-centred group."
+  },
+  "profile": "default"
+}

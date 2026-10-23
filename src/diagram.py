@@ -5,9 +5,10 @@ RDKit 2D structure (no hydrogens, with formal charges) at a uniform, readable
 scale; units are arranged compactly around the ligand by their real 3D
 direction, with dashed interaction bonds between the specific interacting atoms.
 
-Chemistry: connectivity from ChimeraX bonds, bond orders from a ChimeraX Mol2
-export, formal charges from a standard residue table (local patterns for
-ligands). RDKit draws each unit at a fixed bond length to its own transparent
+Chemistry: native engine templates preserve complete ligand assemblies and
+covalent attachment boundaries; native receptor annotations override source
+charges and product bond orders. Without engine context, ordinary residues use
+ChimeraX Mol2 chemistry and the standard residue table. RDKit draws each unit at a fixed bond length to its own transparent
 image; matplotlib composites the images and overlays the interaction bonds.
 Qt-free for headless testing.
 """
@@ -15,6 +16,7 @@ Qt-free for headless testing.
 from __future__ import annotations
 
 from .colors import mpl_color
+from .view_state import DiagramPresentation
 
 _FALLBACK_FACE = "#e0e0e0"
 _FIXED_BOND_PX = 28.0          # on-screen bond length (uniform across all units)
@@ -37,13 +39,14 @@ _STANDARD_RESIDUES = {
 
 
 class _Unit:
-    __slots__ = ("residue", "molecule_type", "ok", "mol", "atom_to_local", "local_xy",
+    __slots__ = ("residue", "residues", "molecule_type", "ok", "mol", "atom_to_local", "local_xy",
                  "centroid3d", "radius", "label",
                  "image", "png", "img_w", "img_h", "atom_px", "centroid_px",
                  "center", "global_origin")
 
     def __init__(self, residue):
         self.residue = residue
+        self.residues = (residue,)
         self.molecule_type = "other"
         self.ok = False
         self.mol = None
@@ -68,19 +71,24 @@ class _Edge:
     ``ringA``/``ringB`` (when set) hold an endpoint's aromatic-ring atoms; that
     end of the line terminates at the centroid of those atoms rather than at the
     single ``atomA``/``atomB`` (used as a fallback / obstacle base).
+    ``centerA``/``centerB`` hold amide C/N atoms; their midpoint can span units.
+    ``units`` includes every contributing depiction for visibility and routing.
     """
 
     __slots__ = ("unitA", "atomA", "ringA", "unitB", "atomB", "ringB",
-                 "interaction_type", "distance")
+                 "centerA", "centerB", "units", "interaction_type", "distance")
 
     def __init__(self, unitA, atomA, ringA, unitB, atomB, ringB,
-                 interaction_type, distance):
+                 interaction_type, distance, *, centerA=None, centerB=None, units=None):
         self.unitA = unitA
         self.atomA = atomA
         self.ringA = ringA
         self.unitB = unitB
         self.atomB = atomB
         self.ringB = ringB
+        self.centerA = centerA
+        self.centerB = centerB
+        self.units = tuple(dict.fromkeys(units or (unitA, unitB)))
         self.interaction_type = interaction_type
         self.distance = distance
 
@@ -94,10 +102,11 @@ class DiagramScene:
     """
 
     __slots__ = ("units", "edges", "atom_pos", "atom_unit", "extent",
-                 "summary", "show_distances")
+                 "summary", "show_distances", "presentation")
 
     def __init__(self, units, edges, atom_pos, atom_unit, extent, summary,
-                 show_distances):
+                 show_distances, presentation=None):
+        self.presentation = presentation or DiagramPresentation()
         self.units = units
         self.edges = edges
         self.atom_pos = atom_pos        # atom -> np.array([x, y])
@@ -108,7 +117,8 @@ class DiagramScene:
 
 
 def build_scene(session, structure, rows, selected_residues, *,
-                include_hidden=False, show_distances=True, style="default"):
+                include_hidden=False, show_distances=True, style="default", font_size=10.0,
+                native_result=None, id_to_atom=None):
     """Compute the diagram geometry once; return a :class:`DiagramScene`.
 
     Qt-free, so it backs both the headless matplotlib export and the
@@ -122,6 +132,13 @@ def build_scene(session, structure, rows, selected_residues, *,
     if not selected_residues:
         raise ValueError("Select a ligand or residue(s) first, then export.")
 
+    id_to_atom = id_to_atom or {}
+    selections, selection_by_residue = _ligand_context(native_result, id_to_atom)
+    selected_residues = set(selected_residues)
+    for selection in selections:
+        residues = {id_to_atom[aid].residue for aid in selection.atom_ids if aid in id_to_atom}
+        if residues & selected_residues:
+            selected_residues.update(residues)
     scoped = _scope_rows(rows, selected_residues, include_hidden)
     if not scoped:
         raise ValueError("No interactions for the current selection.")
@@ -131,24 +148,42 @@ def build_scene(session, structure, rows, selected_residues, *,
     interactions_per_res = {}
     for row in scoped:
         for ep in (row.endpoint1, row.endpoint2):
-            res = ep.atom.residue
-            mtype.setdefault(res, ep.molecule_type)
-            interactions_per_res[res] = interactions_per_res.get(res, 0) + 1
+            for res in {atom.residue for atom in _endpoint_atoms(ep)}:
+                mtype.setdefault(res, ep.molecule_type)
+                interactions_per_res[res] = interactions_per_res.get(res, 0) + 1
 
     order_lookup = _mol2_bond_orders(session, structure)
+    native_by_atom = {id_to_atom[a.atom_id]: a for a in native_result.atoms
+                      if a.atom_id in id_to_atom} if native_result is not None else {}
+    native_orders = _native_bond_orders(native_result)
     units = []
+    completed = set()
     for res in mtype:
-        u = _build_unit(res, order_lookup, np, Chem)
+        selection = selection_by_residue.get(res)
+        if selection is not None:
+            if selection.ligand_id in completed:
+                continue
+            completed.add(selection.ligand_id)
+            u = _build_ligand_unit(selection, native_result, id_to_atom, np, Chem)
+        elif native_result is not None and mtype[res] == "ligand":
+            u = _Unit(res)
+            u.label += " [unresolved chemistry]"
+            heavy = [a for a in res.atoms if a.element.name != "H"]
+            u.centroid3d = np.mean([a.scene_coord for a in heavy], axis=0)
+            _fallback_unit(u, heavy, np)
+        else:
+            u = _build_unit(res, order_lookup, np, Chem,
+                            native_by_atom=native_by_atom, native_orders=native_orders)
         u.molecule_type = mtype[res]
         units.append(u)
-    by_residue = {u.residue: u for u in units}
+    by_residue = {res: u for u in units for res in u.residues}
 
     center = _choose_center(units, selected_residues, interactions_per_res)
 
     # Render before placing: layout keys residue angles off the centre's
     # rendered atom pixels, and per-unit rendering is placement-independent.
     for u in units:
-        _render_unit(u, np, Chem, rdMolDraw2D, style=style)
+        _render_unit(u, np, Chem, rdMolDraw2D, style=style, font_size=font_size)
     _place_units(units, center, scoped, np)
 
     global_xy, extent_px, _fallbacks = _compose_positions(units, np)
@@ -162,8 +197,17 @@ def build_scene(session, structure, rows, selected_residues, *,
             continue
         ringA = _ring_in_scene(getattr(row.endpoint1, "ring_atoms", None), global_xy)
         ringB = _ring_in_scene(getattr(row.endpoint2, "ring_atoms", None), global_xy)
+        centerA = getattr(row.endpoint1, "center_atoms", None)
+        centerB = getattr(row.endpoint2, "center_atoms", None)
+        # A midpoint needs both defining atoms, including when the amide spans
+        # two separately depicted residues. Never substitute the carbon alone.
+        if any(atom not in global_xy for group in (centerA, centerB) for atom in group or ()):
+            continue
+        edge_units = [ra[0], rb[0]] + [atom_unit[atom]
+            for group in (centerA, centerB, ringA, ringB) for atom in group or ()]
         edges.append(_Edge(ra[0], ra[1], ringA, rb[0], rb[1], ringB,
-                           row.interaction_type, row.distance))
+                           row.interaction_type, row.distance,
+                           centerA=centerA, centerB=centerB, units=edge_units))
 
     summary = {
         "nodes": len(units),
@@ -174,7 +218,65 @@ def build_scene(session, structure, rows, selected_residues, *,
         "fallback": sorted(u.label for u in units if not u.ok),
     }
     return DiagramScene(units, edges, global_xy, atom_unit, extent_px, summary,
-                        show_distances)
+                        show_distances, DiagramPresentation(style=style, font_size=font_size))
+
+
+def _visible_scene_geometry(scene):
+    """Current visible units, atom positions, routed legs and pixel bounds."""
+    import numpy as np
+    state = scene.presentation
+    units = [unit for unit in scene.units if state.unit_visible(unit)]
+    positions = {atom: xy for atom, xy in scene.atom_pos.items()
+                 if state.unit_visible(scene.atom_unit[atom])}
+    corners = []
+    for unit in units:
+        origin = np.asarray(unit.global_origin, dtype=float)
+        if unit.ok and unit.image is not None:
+            corners.extend((origin, origin + [unit.img_w, unit.img_h]))
+        else:
+            corners.extend((origin - 30, origin + 30))
+        label = _unit_label_anchor(unit, positions, np)
+        if label[0] is not None:
+            corners.append(label)
+    routes = []
+    for edge in scene.edges:
+        if not state.edge_visible(edge):
+            continue
+        first = _endpoint_pos(edge.atomA, edge.ringA, positions, np, edge.centerA)
+        second = _endpoint_pos(edge.atomB, edge.ringB, positions, np, edge.centerB)
+        if first is None or second is None:
+            continue
+        obstacles, weights = _obstacles_for_edge(edge, positions, scene.atom_unit, np)
+        route = _route_edge(first, second, obstacles, weights, np)
+        routes.append((edge, route))
+        corners.extend(route)
+    if corners:
+        points = np.asarray(corners, dtype=float)
+        bounds = (points.min(axis=0) - 20, points.max(axis=0) + 20)
+    else:
+        bounds = (np.array([-20., -20.]), np.array([21., 21.]))
+    return units, positions, routes, bounds
+
+
+def _fit_figure_to_content(figure, padding=20):
+    """Include actual text/legend extents even when savefig has no tight bbox.
+
+    Translate the axes on a resized canvas without changing data scale or font
+    sizes. Long covalent-attachment labels can extend outside the initial axes.
+    """
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    canvas = FigureCanvasAgg(figure)
+    canvas.draw()
+    bounds = figure.get_tightbbox(canvas.get_renderer()).transformed(figure.dpi_scale_trans)
+    old_width, old_height = figure.bbox.width, figure.bbox.height
+    axes = [(axis, axis.get_position().frozen()) for axis in figure.axes]
+    width, height = max(1., bounds.width + 2 * padding), max(1., bounds.height + 2 * padding)
+    figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)
+    for axis, position in axes:
+        axis.set_position([(position.x0 * old_width - bounds.x0 + padding) / width,
+                           (position.y0 * old_height - bounds.y0 + padding) / height,
+                           position.width * old_width / width, position.height * old_height / height])
+    canvas.draw()
 
 
 def render_scene_matplotlib(scene, *, title=None):
@@ -183,14 +285,16 @@ def render_scene_matplotlib(scene, *, title=None):
     from matplotlib.figure import Figure
     from matplotlib.lines import Line2D
 
-    units = scene.units
-    global_xy = scene.atom_pos
-    width, height = scene.extent
+    presentation = scene.presentation
+    font_size = presentation.font_size
+    units, global_xy, routes, (minimum, maximum) = _visible_scene_geometry(scene)
+    width, height = maximum - minimum
+    color_for = lambda kind: presentation.colors.get(kind, mpl_color(kind))
     fig = Figure(figsize=(min(22, max(6, width / 150.0)), min(22, max(5, height / 150.0))))
     ax = fig.add_subplot(111)
     ax.set_axis_off()
-    ax.set_xlim(0, width)
-    ax.set_ylim(height, 0)
+    ax.set_xlim(minimum[0], maximum[0])
+    ax.set_ylim(maximum[1], minimum[1])
 
     for u in units:
         if u.ok and u.image is not None:
@@ -204,52 +308,49 @@ def render_scene_matplotlib(scene, *, title=None):
                            edgecolors="#666666", zorder=2)
         cx, cy = _unit_label_anchor(u, global_xy, np)
         if cx is not None:
-            ax.text(cx, cy, u.label, fontsize=8, color="#444444", ha="center",
+            ax.text(cx, cy, u.label, fontsize=font_size, color="#444444", ha="center",
                     va="bottom", zorder=5)
 
     types_drawn = set()
     label_edges = scene.show_distances and len(scene.edges) <= 60
-    for e in scene.edges:
-        pA = _endpoint_pos(e.atomA, e.ringA, global_xy, np)
-        pB = _endpoint_pos(e.atomB, e.ringB, global_xy, np)
-        if pA is None or pB is None:
-            continue
-        obs_pos, obs_w = _obstacles_for_edge(e, global_xy, scene.atom_unit, np)
-        pts = _route_edge(pA, pB, obs_pos, obs_w, np)
-        color = mpl_color(e.interaction_type)
+    for e, pts in routes:
+        color = color_for(e.interaction_type)
         ax.plot(pts[:, 0], pts[:, 1], ls="--", lw=1.8, color=color,
                 alpha=0.9, zorder=3)
         types_drawn.add(e.interaction_type)
         if label_edges and e.distance is not None:
             m = pts[len(pts) // 2]
-            ax.text(m[0], m[1], "%.1f" % e.distance, fontsize=7, color=color,
+            ax.text(m[0], m[1], "%.1f" % e.distance, fontsize=font_size, color=color,
                     ha="center", va="center", zorder=4,
                     bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.8))
 
-    handles = [Line2D([0], [0], color=mpl_color(t), ls="--", lw=2, label=t)
+    handles = [Line2D([0], [0], color=color_for(t), ls="--", lw=2, label=t)
                for t in sorted(types_drawn)]
-    if handles:
+    if handles and presentation.legend_visible:
         ax.legend(handles=handles, title="Interaction", loc="upper left",
-                  bbox_to_anchor=(1.01, 1.0), fontsize=8, title_fontsize=9, frameon=False)
+                  bbox_to_anchor=(1.01, 1.0), fontsize=font_size, title_fontsize=font_size, frameon=False)
     if title:
-        ax.set_title(title, fontsize=11)
-    fig.tight_layout()
+        ax.set_title(title, fontsize=font_size)
+    _fit_figure_to_content(fig)
     return fig
 
 
 def build_diagram(session, structure, rows, selected_residues, *, title=None,
-                  include_hidden=False, show_distances=True):
+                  include_hidden=False, show_distances=True, native_result=None, id_to_atom=None):
     """Build the diagram; return ``(matplotlib Figure, summary dict)``."""
     scene = build_scene(session, structure, rows, selected_residues,
-                        include_hidden=include_hidden, show_distances=show_distances)
+                        include_hidden=include_hidden, show_distances=show_distances,
+                        native_result=native_result, id_to_atom=id_to_atom)
     fig = render_scene_matplotlib(scene, title=title)
     return fig, scene.summary
 
 
 def export_interaction_diagram(session, structure, rows, selected_residues, path, *,
-                               title=None, include_hidden=False, show_distances=True, dpi=300):
+                               title=None, include_hidden=False, show_distances=True, dpi=300,
+                               native_result=None, id_to_atom=None):
     fig, summary = build_diagram(session, structure, rows, selected_residues, title=title,
-                                 include_hidden=include_hidden, show_distances=show_distances)
+                                 include_hidden=include_hidden, show_distances=show_distances,
+                                 native_result=native_result, id_to_atom=id_to_atom)
     fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
     summary["path"] = str(path)
     return summary
@@ -257,21 +358,137 @@ def export_interaction_diagram(session, structure, rows, selected_residues, path
 
 # ----- scoping ------------------------------------------------------------
 
+def _endpoint_atoms(endpoint):
+    return (getattr(endpoint, "center_atoms", None)
+            or getattr(endpoint, "ring_atoms", None) or (endpoint.atom,))
+
+
 def _scope_rows(rows, selected_residues, include_hidden):
     out = []
+    seen = set()
     for row in rows:
         pb = row.pseudobond
         if not include_hidden and pb is not None:
             if getattr(pb, "deleted", False) or not getattr(pb, "display", True):
                 continue
-        if (row.endpoint1.atom.residue not in selected_residues
-                and row.endpoint2.atom.residue not in selected_residues):
+        groups = [_endpoint_atoms(ep) for ep in (row.endpoint1, row.endpoint2)]
+        if not any(atom.residue in selected_residues for group in groups for atom in group):
             continue
-        out.append(row)
+        key = (row.interaction_type, frozenset(frozenset(group) for group in groups))
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
     return out
 
 
 # ----- chemistry ----------------------------------------------------------
+
+def _ligand_context(result, id_to_atom):
+    if result is None:
+        return [], {}
+    from chemur.ligand_selection import ligand_selections
+    selections = list(ligand_selections(result))
+    from types import SimpleNamespace
+    products = dict(result.metadata.get("chemical_products") or {})
+    products.update({component.metadata["chemical_product"]["assembly_id"]:
+                     component.metadata["chemical_product"] for component in result.components
+                     if isinstance(component.metadata.get("chemical_product"), dict)})
+    existing = {selection.ligand_id for selection in selections}
+    for product_id, chemistry in products.items():
+        if product_id not in existing and chemistry.get("product_kind") == "modified_polymer":
+            selections.append(SimpleNamespace(ligand_id=product_id,
+                atom_ids=tuple(chemistry.get("atom_ids", ())),
+                component_ids=tuple(chemistry.get("component_ids", ())), chemistry=chemistry))
+    by_residue = {id_to_atom[aid].residue: selection for selection in selections
+                  for aid in selection.atom_ids if aid in id_to_atom}
+    return selections, by_residue
+
+
+def _native_bond_orders(result):
+    if result is None:
+        return {}
+    records = [component.metadata for component in result.components]
+    records.extend((result.metadata.get("ligand_assemblies") or {}).values())
+    records.extend((result.metadata.get("chemical_products") or {}).values())
+    records.extend(component.metadata["ligand_assembly"] for component in result.components
+                   if "ligand_assembly" in component.metadata)
+    return {frozenset((bond["atom_id_1"], bond["atom_id_2"])): bond["order"]
+            for record in records for bond in record.get("bond_orders", [])}
+
+
+def _build_ligand_unit(selection, result, id_to_atom, np, Chem):
+    """Draw one whole validated ligand; external product atoms become labelled dummies."""
+    from rdkit.Chem import rdDepictor
+    records = {atom.atom_id: atom for atom in result.atoms}
+    owned = {aid for aid in selection.atom_ids if records[aid].element not in {"H", "D"}}
+    mapped = {aid: id_to_atom[aid] for aid in owned if aid in id_to_atom}
+    live = [id_to_atom[aid] for aid in selection.atom_ids if aid in id_to_atom]
+    residues = tuple(dict.fromkeys(atom.residue for atom in live))
+    unit = _Unit(residues[0])
+    unit.residues = residues
+    component_by_id = {component.component_id: component for component in result.components}
+    unit.label = " + ".join("%s %s" % (component_by_id[cid].name, component_by_id[cid].residue_id)
+                            for cid in selection.component_ids)
+    unit.centroid3d = np.mean([atom.scene_coord for atom in (list(mapped.values()) or live)], axis=0)
+    try:
+        chemistry = selection.chemistry
+        if chemistry.get("status") not in {None, "validated"}:
+            raise ValueError("unvalidated chemistry")
+        template = Chem.MolFromSmiles(chemistry.get("smiles", ""))
+        mapping = {int(index): int(aid) for index, aid in chemistry.get("template_mapping", {}).items()}
+        boundary_mapping = {int(index): int(aid) for index, aid in chemistry.get("boundary_template_mapping", {}).items()}
+        if template is None or not owned.issubset(mapping.values()):
+            raise ValueError("incomplete product mapping")
+        rw = Chem.RWMol()
+        old_to_new = {}
+        for index, aid in mapping.items():
+            if aid not in owned:
+                continue
+            source = template.GetAtomWithIdx(index)
+            if source.GetSymbol() != records[aid].element:
+                raise ValueError("inconsistent product mapping")
+            old_to_new[index] = rw.AddAtom(Chem.Atom(source))
+        attachments = []
+        for bond in template.GetBonds():
+            first, second = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            inside = (first in old_to_new, second in old_to_new)
+            if not any(inside):
+                continue
+            if not all(inside):
+                external = second if inside[0] else first
+                dummy = Chem.Atom(0)
+                target = records.get(mapping.get(external, boundary_mapping.get(external)))
+                label = ("%s %s:%s" % (target.residue_name, target.residue_id, target.name)
+                         if target is not None else "attachment")
+                dummy.SetProp("atomLabel", label)
+                dummy.SetNoImplicit(True)
+                # A boundary site is specific to its cut bond, even if another
+                # ligand atom attaches to the same external product atom.
+                dummy_index = rw.AddAtom(dummy)
+                local = first if inside[0] else second
+                rw.AddBond(old_to_new[local], dummy_index, bond.GetBondType())
+                attachments.append(label)
+            else:
+                rw.AddBond(old_to_new[first], old_to_new[second], bond.GetBondType())
+        molecule = rw.GetMol()
+        Chem.SanitizeMol(molecule)
+        rdDepictor.Compute2DCoords(molecule)
+        unit.mol = molecule
+        unit.atom_to_local = {mapped[aid]: old_to_new[index] for index, aid in mapping.items()
+                              if aid in mapped}
+        conf = molecule.GetConformer()
+        unit.local_xy = {index: np.array([conf.GetAtomPosition(index).x,
+                                         conf.GetAtomPosition(index).y])
+                         for index in range(molecule.GetNumAtoms())}
+        unit.radius = max((float(np.linalg.norm(xy)) for xy in unit.local_xy.values()), default=0.8) or 0.8
+        unit.ok = True
+        if attachments:
+            unit.label += "\ncovalent attachment: " + ", ".join(sorted(set(attachments)))
+    except (ValueError, RuntimeError, KeyError, IndexError) as error:
+        reason = selection.chemistry.get("reason") or selection.chemistry.get("error") or str(error)
+        unit.label += " [unresolved chemistry: %s]" % reason
+        _fallback_unit(unit, list(mapped.values()), np)
+    return unit
 
 def _mol2_bond_orders(session, structure):
     import os
@@ -317,7 +534,7 @@ def _key(atom):
     return (round(float(c[0]), 2), round(float(c[1]), 2), round(float(c[2]), 2))
 
 
-def _build_unit(residue, order_lookup, np, Chem):
+def _build_unit(residue, order_lookup, np, Chem, *, native_by_atom=None, native_orders=None):
     from rdkit.Chem import rdDepictor
 
     unit = _Unit(residue)
@@ -327,6 +544,8 @@ def _build_unit(residue, order_lookup, np, Chem):
     unit.centroid3d = np.mean(np.array([a.scene_coord for a in heavy], dtype=float), axis=0)
 
     idx = {a: i for i, a in enumerate(heavy)}
+    native_by_atom = native_by_atom or {}
+    native_orders = native_orders or {}
     bt_map = {"1": Chem.BondType.SINGLE, "2": Chem.BondType.DOUBLE, "3": Chem.BondType.TRIPLE,
               "ar": Chem.BondType.AROMATIC, "am": Chem.BondType.SINGLE}
     rw = Chem.RWMol()
@@ -345,6 +564,11 @@ def _build_unit(residue, order_lookup, np, Chem):
                 continue
             done.add(pair)
             ostr = order_lookup.get(frozenset((_key(a), _key(o))), "1")
+            first, second = native_by_atom.get(a), native_by_atom.get(o)
+            if first is not None and second is not None:
+                order = native_orders.get(frozenset((first.atom_id, second.atom_id)))
+                if order is not None:
+                    ostr = {1.0: "1", 1.5: "ar", 2.0: "2", 3.0: "3"}.get(float(order), ostr)
             order_str[pair] = ostr
             bt = bt_map.get(ostr, Chem.BondType.SINGLE)
             rw.AddBond(idx[a], idx[o], bt)
@@ -355,6 +579,13 @@ def _build_unit(residue, order_lookup, np, Chem):
     for i in aromatic:
         mol.GetAtomWithIdx(i).SetIsAromatic(True)
     _assign_formal_charges(residue, heavy, idx, order_str, aromatic, mol)
+    for atom, index in idx.items():
+        record = native_by_atom.get(atom)
+        if record is not None:
+            mol.GetAtomWithIdx(index).SetFormalCharge(record.formal_charge)
+            if record.metadata.get("chemistry_source"):
+                mol.GetAtomWithIdx(index).SetNumExplicitHs(record.hydrogen_count)
+                mol.GetAtomWithIdx(index).SetNoImplicit(True)
 
     flags = (Chem.SanitizeFlags.SANITIZE_ALL
              ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE
@@ -447,7 +678,7 @@ def _fallback_unit(unit, heavy, np):
 # ----- layout -------------------------------------------------------------
 
 def _choose_center(units, selected_residues, interactions_per_res):
-    ligands = [u for u in units if u.molecule_type == "ligand" and u.residue in selected_residues]
+    ligands = [u for u in units if u.molecule_type == "ligand" and selected_residues.intersection(u.residues)]
     if ligands:
         return max(ligands, key=lambda u: len(u.atom_to_local))
     if len(units) == 1:
@@ -527,9 +758,9 @@ def _preferred_dir(unit, center, rows, np):
     offsets = []
     for row in rows:
         a1, a2 = row.endpoint1.atom, row.endpoint2.atom
-        if a1.residue is center.residue and a2.residue is unit.residue:
+        if a1.residue in center.residues and a2.residue in unit.residues:
             ca = a1
-        elif a2.residue is center.residue and a1.residue is unit.residue:
+        elif a2.residue in center.residues and a1.residue in unit.residues:
             ca = a2
         else:
             continue
@@ -548,34 +779,36 @@ def _preferred_dir(unit, center, rows, np):
 
 # Chemical-structure styles the user can pick in the diagram (see
 # _apply_draw_style); RDKit MolDrawOptions verified available in 2025.09.x.
-_STRUCTURE_STYLES = ("default", "bw", "bold", "comic")
+_STRUCTURE_STYLES = ("default", "bw", "bold")
 
 
-def _apply_draw_style(opts, style):
+def _apply_draw_style(opts, style, font_size=10.0):
     """Configure RDKit ``MolDrawOptions`` for one of :data:`_STRUCTURE_STYLES`."""
+    if style not in _STRUCTURE_STYLES:
+        raise ValueError("Unknown chemical structure style: %s" % style)
+    if not 6.0 <= float(font_size) <= 24.0:
+        raise ValueError("Diagram font size must be between 6 and 24 pt")
+    # Qt point sizes and the 96 dpi scene use the same physical text size.
+    opts.fixedFontSize = round(float(font_size) * 96.0 / 72.0)
     opts.fixedBondLength = float(_FIXED_BOND_PX)   # uniform scale across units
     opts.setBackgroundColour((1, 1, 1, 0))         # transparent
     if style == "bw":
         opts.useBWAtomPalette()
     elif style == "bold":
         opts.bondLineWidth = 3
-        opts.minFontSize = 16
-        opts.maxFontSize = 22
-    elif style == "comic":
-        opts.comicMode = True
 
 
-def restyle_unit(unit, style):
+def restyle_unit(unit, style, font_size=10.0):
     """Re-render one unit's structure image in a new style, in place."""
     import numpy as np
     from rdkit import Chem
     from rdkit.Chem.Draw import rdMolDraw2D
-    _render_unit(unit, np, Chem, rdMolDraw2D, style=style)
+    _render_unit(unit, np, Chem, rdMolDraw2D, style=style, font_size=font_size)
 
 
-def _render_unit(unit, np, Chem, rdMolDraw2D, style="default"):
+def _render_unit(unit, np, Chem, rdMolDraw2D, style="default", font_size=10.0):
     import io
-    import matplotlib.image as mpimg
+    from PIL import Image
 
     if not unit.ok or unit.mol is None:
         unit.atom_px = {a: np.array([0.0, 0.0]) for a in unit.atom_to_local}
@@ -587,25 +820,37 @@ def _render_unit(unit, np, Chem, rdMolDraw2D, style="default"):
     ys = [p[1] for p in unit.local_xy.values()]
     bw = (max(xs) - min(xs)) or 1.0
     bh = (max(ys) - min(ys)) or 1.0
-    pad = int(_FIXED_BOND_PX)
+    label_chars = max((len(atom.GetProp("atomLabel")) for atom in unit.mol.GetAtoms()
+                       if atom.HasProp("atomLabel")), default=2)
+    pad = max(int(_FIXED_BOND_PX), int(font_size * 96.0 / 72.0 * (label_chars + 2)))
     w = max(60, int(bw * _PPU) + 2 * pad)
     h = max(60, int(bh * _PPU) + 2 * pad)
 
     drawer = rdMolDraw2D.MolDraw2DCairo(w, h)
-    _apply_draw_style(drawer.drawOptions(), style)
+    _apply_draw_style(drawer.drawOptions(), style, font_size)
     try:
         prepared = rdMolDraw2D.PrepareMolForDrawing(unit.mol, kekulize=False)
     except Exception:
         prepared = unit.mol
     drawer.DrawMolecule(prepared)
     drawer.FinishDrawing()
-    unit.png = drawer.GetDrawingText()
-    unit.image = mpimg.imread(io.BytesIO(unit.png), format="png")
-    unit.img_w, unit.img_h = w, h
+    png = drawer.GetDrawingText()
+    image = Image.open(io.BytesIO(png)).convert("RGBA")
+    bounds = image.getchannel("A").getbbox()
+    left, top = 0, 0
+    if bounds:
+        left, top, right, bottom = bounds
+        left, top = max(0, left - 4), max(0, top - 4)
+        image = image.crop((left, top, min(w, right + 4), min(h, bottom + 4)))
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    unit.png = output.getvalue()
+    unit.image = np.asarray(image) / 255.0
+    unit.img_w, unit.img_h = image.size
     unit.atom_px = {}
     for a, li in unit.atom_to_local.items():
         p = drawer.GetDrawCoords(li)
-        unit.atom_px[a] = np.array([float(p.x), float(p.y)])
+        unit.atom_px[a] = np.array([float(p.x) - left, float(p.y) - top])
     unit.centroid_px = np.mean(np.array(list(unit.atom_px.values())), axis=0)
 
 
@@ -678,9 +923,12 @@ def _ring_in_scene(ring_atoms, global_xy):
     return present if len(present) >= 3 else None
 
 
-def _endpoint_pos(atom, ring, pos_lookup, np):
-    """Pixel position of an edge endpoint: the ring centroid if ``ring`` is set,
-    else the single atom's position."""
+def _endpoint_pos(atom, ring, pos_lookup, np, center_atoms=None):
+    """Pixel position of a midpoint, ring centroid, or single atom."""
+    if center_atoms:
+        if any(member not in pos_lookup for member in center_atoms):
+            return None
+        return np.mean([pos_lookup[member] for member in center_atoms], axis=0)
     if ring:
         pts = [pos_lookup[a] for a in ring if a in pos_lookup]
         if pts:
@@ -704,8 +952,10 @@ def _obstacles_for_edge(edge, atom_pos, atom_unit, np):
     through its own structure to reach its atom/centre), so routing chiefly
     avoids *other* structures.
     """
-    ep_units = (id(edge.unitA), id(edge.unitB))
+    ep_units = {id(unit) for unit in edge.units}
     skip = {edge.atomA, edge.atomB}
+    skip.update(edge.centerA or ())
+    skip.update(edge.centerB or ())
     if edge.ringA:
         skip.update(edge.ringA)
     if edge.ringB:

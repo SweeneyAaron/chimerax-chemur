@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 
 from Qt.QtCore import Qt, QPointF, QRectF, QSize
-from Qt.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
+from Qt.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
 from Qt.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsItem, QGraphicsItemGroup, QGraphicsPathItem,
     QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
@@ -22,6 +22,7 @@ from Qt.QtWidgets import (
 
 from .colors import rgba_255
 from .diagram import _endpoint_pos, _obstacles_for_edge, _route_edge
+from .view_state import zoom_scale
 
 _FALLBACK_FACE = QColor("#e0e0e0")
 _FALLBACK_EDGE = QColor("#666666")
@@ -119,6 +120,10 @@ class InteractiveDiagramView(QGraphicsView):
         import numpy as np
         self._np = np
         self._model = scene_model
+        self._presentation = scene_model.presentation
+        self._initial_centers = {id(unit): np.asarray(unit.global_origin) +
+                                 (unit.centroid_px if unit.centroid_px is not None else np.zeros(2))
+                                 for unit in scene_model.units}
         self._scene = QGraphicsScene(self)
         self._scene.setBackgroundBrush(QColor("white"))
         self.setScene(self._scene)
@@ -138,13 +143,15 @@ class InteractiveDiagramView(QGraphicsView):
         self._recs_by_type = {}               # type -> [_EdgeRec]
 
         # User-controllable state.
-        self._type_visible = {}               # type -> bool (default True)
-        self._edge_visible = {}               # id(edge) -> bool (default True)
-        self._type_color = {}                 # type -> QColor override
-        self._style = "default"               # current structure style
-        self._legend_on = True
+        self._type_visible = self._presentation.types               # type -> bool (default True)
+        self._edge_visible = self._presentation.edges               # id(edge) -> bool (default True)
+        self._type_color = {kind: QColor.fromRgbF(*rgba)
+                            for kind, rgba in self._presentation.colors.items()}
+        self._style = self._presentation.style               # current structure style
+        self._legend_on = self._presentation.legend_visible
         self._legend_group = None
         self._fitted = False
+        self._relative_zoom = 1.0
 
         self._build()
 
@@ -170,6 +177,7 @@ class InteractiveDiagramView(QGraphicsView):
             label_item = None
             if label_edges and edge.distance is not None:
                 label_item = QGraphicsSimpleTextItem("%.1f" % edge.distance)
+                label_item.setFont(self._text_font())
                 label_item.setPen(QPen(QColor("white"), 0.6))
                 label_item.setZValue(4.0)
                 self._scene.addItem(label_item)
@@ -178,9 +186,8 @@ class InteractiveDiagramView(QGraphicsView):
             self._edge_recs.append(rec)
             self._rec_by_edge[id(edge)] = rec
             self._recs_by_type.setdefault(edge.interaction_type, []).append(rec)
-            self._edges_by_unit.setdefault(id(edge.unitA), []).append(rec)
-            if id(edge.unitB) != id(edge.unitA):
-                self._edges_by_unit.setdefault(id(edge.unitB), []).append(rec)
+            for unit in edge.units:
+                self._edges_by_unit.setdefault(id(unit), []).append(rec)
             self._apply_edge_style(rec)
             self._reroute(rec)
 
@@ -188,6 +195,7 @@ class InteractiveDiagramView(QGraphicsView):
 
     def _add_unit_label(self, unit, item):
         text = QGraphicsSimpleTextItem(unit.label, item)
+        text.setFont(self._text_font())
         text.setBrush(_LABEL_COLOR)
         text.setZValue(5.0)
         item.label_item = text
@@ -197,6 +205,42 @@ class InteractiveDiagramView(QGraphicsView):
         text.setPos(br.center().x() - tb.width() / 2.0, br.top() - tb.height() - 2.0)
 
     # ----- styling / visibility (public API for the dialog) ----------------
+
+    def _text_font(self):
+        font = QFont(self.font())
+        font.setPointSizeF(self._presentation.font_size)
+        return font
+
+    def set_unit_visible(self, unit, visible):
+        self._presentation.units[id(unit)] = bool(visible)
+        self._unit_items[id(unit)].setVisible(bool(visible))
+        for rec in self._edge_recs:
+            self._apply_edge_style(rec)
+            self._reroute(rec)
+        self._rebuild_legend()
+
+    def set_font_size(self, points):
+        points = float(points)
+        if not 6 <= points <= 24:
+            raise ValueError("Diagram font size must be between 6 and 24 pt")
+        if points == self._presentation.font_size:
+            return
+        self._presentation.font_size = points
+        for item in self._unit_items.values():
+            item.label_item.setFont(self._text_font())
+        for rec in self._edge_recs:
+            if rec.label is not None:
+                rec.label.setFont(self._text_font())
+        self._rerender_structures()
+        for item in self._unit_items.values():
+            self._position_unit_label(item)
+        self._rebuild_legend()
+
+    @staticmethod
+    def _position_unit_label(item):
+        br, tb = item.boundingRect(), item.label_item.boundingRect()
+        item.label_item.setPos(br.center().x() - tb.width() / 2.0,
+                               br.top() - tb.height() - 2.0)
 
     def types_present(self):
         """Interaction types in this diagram, sorted."""
@@ -219,12 +263,14 @@ class InteractiveDiagramView(QGraphicsView):
 
     def set_type_color(self, interaction_type, qcolor):
         self._type_color[interaction_type] = QColor(qcolor)
+        self._presentation.colors[interaction_type] = self._type_color[interaction_type].getRgbF()
         for rec in self._recs_by_type.get(interaction_type, ()):
             self._apply_edge_style(rec)
         self._rebuild_legend()
 
     def set_legend_visible(self, on):
         self._legend_on = bool(on)
+        self._presentation.legend_visible = self._legend_on
         self._rebuild_legend()
 
     def set_structure_style(self, style):
@@ -233,6 +279,12 @@ class InteractiveDiagramView(QGraphicsView):
         if style == self._style:
             return
         self._style = style
+        self._presentation.style = style
+        self._rerender_structures()
+
+    def _rerender_structures(self):
+        from . import diagram
+        style = self._style
         np = self._np
         for unit in self._model.units:
             item = self._unit_items.get(id(unit))
@@ -241,7 +293,7 @@ class InteractiveDiagramView(QGraphicsView):
             old = unit.centroid_px
             centroid_scene = (item.pos().x() + float(old[0]),
                               item.pos().y() + float(old[1]))
-            diagram.restyle_unit(unit, style)          # updates png/img/atom_px/centroid_px
+            diagram.restyle_unit(unit, style, self._presentation.font_size)          # updates png/img/atom_px/centroid_px
             item.refresh_pixmap()
             new = unit.centroid_px
             item.setPos(centroid_scene[0] - float(new[0]),
@@ -253,8 +305,10 @@ class InteractiveDiagramView(QGraphicsView):
             if item is None:
                 continue
             ox, oy = item.pos().x(), item.pos().y()
+            unit.global_origin = np.array([ox, oy])
             for atom, px in unit.atom_px.items():
                 self._atom_pos[atom] = np.array([ox + float(px[0]), oy + float(px[1])])
+        self._model.atom_pos = dict(self._atom_pos)
         for rec in self._edge_recs:
             self._reroute(rec)
         self._rebuild_legend()
@@ -269,8 +323,7 @@ class InteractiveDiagramView(QGraphicsView):
         rec.path.setPen(pen)
         if rec.label is not None:
             rec.label.setBrush(col)
-        visible = (self._type_visible.get(rec.edge.interaction_type, True)
-                   and self._edge_visible.get(id(rec.edge), True))
+        visible = self._presentation.edge_visible(rec.edge)
         rec.path.setVisible(visible)
         if rec.label is not None:
             rec.label.setVisible(visible)
@@ -283,7 +336,8 @@ class InteractiveDiagramView(QGraphicsView):
             self._legend_group = None
         if not self._legend_on:
             return
-        types = [t for t in self.types_present() if self._type_visible.get(t, True)]
+        types = sorted({rec.edge.interaction_type for rec in self._edge_recs
+                        if self._presentation.edge_visible(rec.edge)})
         if not types:
             return
         group = QGraphicsItemGroup()
@@ -295,10 +349,11 @@ class InteractiveDiagramView(QGraphicsView):
             swatch.setPen(QPen(QColor("#888888"), 0.5))
             group.addToGroup(swatch)
             text = QGraphicsSimpleTextItem(t)
+            text.setFont(self._text_font())
             text.setBrush(QColor("#222222"))
             text.setPos(16.0, y - 1.0)
             group.addToGroup(text)
-            y += 16.0
+            y += max(16.0, text.boundingRect().height() + 4.0)
         self._scene.addItem(group)
         self._legend_group = group
         self._position_legend()
@@ -313,13 +368,23 @@ class InteractiveDiagramView(QGraphicsView):
     def _content_rect(self):
         rect = None
         for item in self._unit_items.values():
-            b = item.sceneBoundingRect()
+            if not item.isVisible():
+                continue
+            b = item.sceneBoundingRect().united(item.label_item.sceneBoundingRect())
             rect = b if rect is None else rect.united(b)
         for rec in self._edge_recs:
             if rec.path.isVisible():
                 b = rec.path.sceneBoundingRect()
+                if rec.label is not None and rec.label.isVisible():
+                    b = b.united(rec.label.sceneBoundingRect())
                 rect = b if rect is None else rect.united(b)
         return rect if rect is not None else QRectF(0.0, 0.0, 1.0, 1.0)
+
+    def _export_rect(self):
+        rect = self._content_rect()
+        if self._legend_group is not None and self._legend_group.isVisible():
+            rect = rect.united(self._legend_group.sceneBoundingRect())
+        return rect.adjusted(-20, -20, 20, 20)
 
     # ----- live re-routing -------------------------------------------------
 
@@ -329,18 +394,23 @@ class InteractiveDiagramView(QGraphicsView):
         if item is None:
             return
         ox, oy = item.pos().x(), item.pos().y()
+        unit.global_origin = np.array([ox, oy])
         for atom, px in unit.atom_px.items():
             self._atom_pos[atom] = np.array([ox + float(px[0]), oy + float(px[1])])
-        for rec in self._edges_by_unit.get(id(unit), ()):  # only this unit's edges
+        self._model.atom_pos = dict(self._atom_pos)
+        for rec in self._edge_recs:
             self._reroute(rec)
+        self._position_legend()
 
     def _reroute(self, rec):
         np = self._np
-        pA = _endpoint_pos(rec.edge.atomA, rec.edge.ringA, self._atom_pos, np)
-        pB = _endpoint_pos(rec.edge.atomB, rec.edge.ringB, self._atom_pos, np)
+        pA = _endpoint_pos(rec.edge.atomA, rec.edge.ringA, self._atom_pos, np, rec.edge.centerA)
+        pB = _endpoint_pos(rec.edge.atomB, rec.edge.ringB, self._atom_pos, np, rec.edge.centerB)
         if pA is None or pB is None:
             return
-        obs_pos, obs_w = _obstacles_for_edge(rec.edge, self._atom_pos, self._atom_unit, np)
+        obstacle_pos = {atom: position for atom, position in self._atom_pos.items()
+                        if self._presentation.unit_visible(self._atom_unit[atom])}
+        obs_pos, obs_w = _obstacles_for_edge(rec.edge, obstacle_pos, self._atom_unit, np)
         pts = _route_edge(pA, pB, obs_pos, obs_w, np)
         path = QPainterPath(QPointF(float(pts[0][0]), float(pts[0][1])))
         for p in pts[1:]:
@@ -359,14 +429,19 @@ class InteractiveDiagramView(QGraphicsView):
         for unit in self._model.units:
             item = self._unit_items.get(id(unit))
             if item is not None:
-                item.setPos(float(unit.global_origin[0]), float(unit.global_origin[1]))
+                center = self._initial_centers[id(unit)]
+                offset = unit.centroid_px if unit.centroid_px is not None else self._np.zeros(2)
+                origin = center - offset
+                item.setPos(float(origin[0]), float(origin[1]))
         self._position_legend()
         self.fit()
 
     def fit(self):
-        rect = self._scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
+        rect = self._export_rect()
         if not rect.isEmpty():
+            self.setSceneRect(rect)
             self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+            self._relative_zoom = 1.0
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -375,16 +450,25 @@ class InteractiveDiagramView(QGraphicsView):
             self.fit()
 
     def wheelEvent(self, event):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
+        angle, pixels = event.angleDelta().y(), event.pixelDelta().y()
+        if not angle and not pixels:
+            event.ignore()
+            return
+        target = zoom_scale(self._relative_zoom, angle, pixels)
+        factor = target / self._relative_zoom
         self.scale(factor, factor)
+        self._relative_zoom = target
+        event.accept()
 
     # ----- export ----------------------------------------------------------
 
     def render_to(self, path, *, dpi=300):
         """Render the current scene (with any manual edits) to ``path``."""
         self._position_legend()
-        rect = self._scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
+        rect = self._export_rect()
         ext = os.path.splitext(path)[1].lower()
+        if ext not in {".png", ".svg", ".pdf"}:
+            raise ValueError("Choose PNG, SVG or PDF for the diagram")
         if ext == ".svg":
             self._render_svg(path, rect)
         elif ext == ".pdf":
@@ -403,7 +487,8 @@ class InteractiveDiagramView(QGraphicsView):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self._scene.render(painter, QRectF(0, 0, w, h), rect)
         painter.end()
-        image.save(path)
+        if not image.save(str(path)):
+            raise OSError("Could not save diagram to %s" % path)
 
     def _render_svg(self, path, rect):
         try:                                      # ChimeraX's Qt shim omits QtSvg
@@ -411,7 +496,7 @@ class InteractiveDiagramView(QGraphicsView):
         except ImportError:
             from PyQt6.QtSvg import QSvgGenerator
         gen = QSvgGenerator()
-        gen.setFileName(path)
+        gen.setFileName(str(path))
         gen.setSize(QSize(int(rect.width()), int(rect.height())))
         gen.setViewBox(QRectF(0, 0, rect.width(), rect.height()))
         painter = QPainter(gen)
@@ -421,7 +506,7 @@ class InteractiveDiagramView(QGraphicsView):
     def _render_pdf(self, path, rect, dpi):
         from Qt.QtCore import QSizeF
         from Qt.QtGui import QPdfWriter, QPageSize
-        writer = QPdfWriter(path)
+        writer = QPdfWriter(str(path))
         writer.setResolution(dpi)
         # Page sized to the diagram (points = px / 96 * 72).
         pts = QSizeF(max(1.0, rect.width() * 72.0 / 96.0),

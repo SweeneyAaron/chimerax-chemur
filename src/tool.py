@@ -17,18 +17,12 @@ from Qt.QtWidgets import (
 )
 
 from .colors import rgba_255
+from .lifecycle import ResultLifecycle, RunCancelled
+from .view_state import ContactView, is_polymer_intrachain
 from .widgets import (
     ElidedLabel, NarrowScrollArea, ResizeNotifyWidget, flow_row, labelled,
     repin_collapsible,
 )
-
-# Per-rule cutoffs we let the user edit, with display labels and spin-box setup.
-_CUTOFF_COLUMNS = [
-    ("distance", "Distance (Å)", 0.0, 50.0, 2, 0.1),
-    ("angle", "Angle (°)", 0.0, 180.0, 1, 1.0),
-    ("offset", "Offset (Å)", 0.0, 50.0, 2, 0.1),
-    ("donor_angle", "Donor angle (°)", 0.0, 180.0, 1, 1.0),
-]
 
 # Top-level result sections: (label, predicate on molecule_type, has chain level).
 _SECTIONS = [
@@ -90,6 +84,18 @@ class ChemurTool(ToolInstance):
         super().__init__(session, tool_name)
         self.display_name = "Chemur"
         self.tool_window = MainToolWindow(self)
+        self._lifecycle = ResultLifecycle()
+        self._static_run = None
+        self._active_result = None
+        self._active_id_to_atom = {}
+        self._view = ContactView([])
+        self._source_overrides = {}
+        self._assembly_paths = {}
+        self._session_handlers = []
+        self._preview_dialog = None
+        self._pose_positions = {}
+        self._cleanup_in_progress = False
+        self._current_frame_index = None
         self._rows = []
         self._ligand_report = []       # [LigandProtonation] from the last analysis
         self._ligand_smiles_overrides = {}  # NAME(upper) -> SMILES, from the report dialog
@@ -115,6 +121,14 @@ class ChemurTool(ToolInstance):
         self._build_ui()
         self.tool_window.manage("side")
         self._set_initial_dock_width(_PREFERRED_DOCK_WIDTH)
+        from chimerax.core.models import REMOVE_MODELS, MODEL_POSITION_CHANGED
+        self._session_handlers = [
+            session.triggers.add_handler(REMOVE_MODELS, self._on_models_removed),
+            session.triggers.add_handler(MODEL_POSITION_CHANGED, self._on_model_position_changed),
+        ]
+        self._model_button.value_changed.connect(self._input_model_changed)
+        self._input_model_changed()
+        self._refresh_engine_info()
 
     def _set_initial_dock_width(self, width):
         """Open the docked panel at a sane width instead of Qt's sizeHint cap.
@@ -133,6 +147,8 @@ class ChemurTool(ToolInstance):
             return
 
         def apply():
+            if self._lifecycle.disposed:
+                return
             try:
                 # Private API, documented as "emergency access" -- never let it
                 # break tool startup.
@@ -147,8 +163,30 @@ class ChemurTool(ToolInstance):
         QTimer.singleShot(0, apply)
 
     def delete(self):
+        if self._lifecycle.disposed:
+            return
+        graphics = self._lifecycle.dispose()
         self._remove_coordset_handler()
+        for handler in self._session_handlers:
+            handler.remove()
+        self._session_handlers = []
+        self._close_graphics(graphics)
         self._clear_pose_3d_groups()
+        for name in ("_protonation_dialog", "_preview_dialog", "_traj_plots_dialog", "_pose_dialog"):
+            self._close_dialog(name)
+        self._rows = []
+        self._view = ContactView([])
+        self._row_items = {}
+        self._rows_by_type = {}
+        self._row_haystacks = []
+        self._ligand_report = []
+        self._traj_item_keys.clear()
+        self._traj_plots = None
+        self._pose_positions = {}
+        self._active_result = self._static_run = self._traj_run = self._pose_comparison = None
+        self._active_id_to_atom.clear()
+        self._source_overrides.clear()
+        self._assembly_paths.clear()
         super().delete()
 
     def _remove_coordset_handler(self):
@@ -204,7 +242,10 @@ class ChemurTool(ToolInstance):
         # lines in a narrow dock instead of setting a ~520 px horizontal floor.
         self._addh_cb = QCheckBox("Add hydrogens")
         self._addh_cb.setChecked(True)
-        self._addh_cb.setToolTip("Run 'addh' first so H-bonds can be detected.")
+        self._addh_cb.setToolTip(
+            "Run 'addh' first so H-bonds can be detected. Hydrogens directly bonded "
+            "to either hydrophobic contact endpoint do not block that contact. "
+            "Other hydrogens and heavy atoms still participate in occlusion checks.")
         self._protonate_cb = QCheckBox("Protonate ligands")
         self._protonate_cb.setToolTip(
             "Use Dimorphite-DL to protonate ligand SMILES at the pH set in "
@@ -255,19 +296,18 @@ class ChemurTool(ToolInstance):
         hide_all = QPushButton("Hide all")
         hide_all.clicked.connect(lambda: self._set_all_visible(False))
 
-        self._interchain_cb = QCheckBox("Inter-chain only")
+        self._interchain_cb = QCheckBox("Hide intra-chain polymer contacts")
         self._interchain_cb.setToolTip(
-            "Hide interactions whose two partners are in the same chain, leaving "
-            "only inter-chain contacts. Live display filter (no re-analysis).\n"
-            "Note: a type whose contacts are all intra-chain shows its legend "
-            "checkbox unticked while this is on.")
+            "Hide contacts within the same polymer chain of the same structure. "
+            "Ligand–protein and ligand–nucleic acid contacts remain visible, even "
+            "when they share a chain label. Live display filter (no re-analysis).")
         self._interchain_cb.toggled.connect(self._on_interchain_toggled)
         layout.addWidget(flow_row(show_all, hide_all, self._interchain_cb))
 
         self._export_scope = QComboBox()
         # (label, scope key). Scope decides which rows _export_interactions writes.
         for label, key in (
-            ("All interactions", "all"),
+            ("All displayed contacts", "all"),
             ("Selected rows", "rows"),
             ("Selected atoms (3D)", "atoms"),
         ):
@@ -281,12 +321,19 @@ class ChemurTool(ToolInstance):
         # Deliberately NOT _shrinkable(): it goes into a flow_row below, and an
         # Ignored horizontal policy makes QWidgetItem::sizeHint() report width 0,
         # which laid the combo out 0 px wide instead of 166.
-        self._export_interactions_btn = QPushButton("Export data…")
+        self._export_interactions_btn = QPushButton("Export displayed contacts…")
         self._export_interactions_btn.setToolTip(
-            "Export interaction data to a JSON or CSV file.")
+            "Export visible contacts in the chosen scope; native groups remain available in assigned results.")
         self._export_interactions_btn.setEnabled(False)
         self._export_interactions_btn.clicked.connect(self._export_interactions)
 
+        self._export_assigned_btn = QPushButton("Export assigned results…")
+        self._export_assigned_btn.setToolTip("Complete native assigned results, including hidden or unmapped interactions; no raw candidates.")
+        self._export_assigned_btn.setEnabled(False)
+        self._export_assigned_btn.clicked.connect(self._export_assigned)
+        self._owner_label = ElidedLabel("No analysis results")
+        layout.addWidget(self._owner_label)
+        layout.addWidget(flow_row(self._export_assigned_btn))
         self._export_btn = QPushButton("Export 2D…")
         self._export_btn.setToolTip("Export a 2D schematic of the selected residues' interactions.")
         self._export_btn.setEnabled(False)
@@ -363,6 +410,8 @@ class ChemurTool(ToolInstance):
         self._repinning = True
 
         def apply():
+            if self._lifecycle.disposed:
+                return
             try:
                 for panel in self._panels:
                     repin_collapsible(panel)
@@ -443,7 +492,10 @@ class ChemurTool(ToolInstance):
         self._pose_show_btn = QPushButton("Show comparison figure…")
         self._pose_show_btn.setEnabled(False)
         self._pose_show_btn.clicked.connect(self._open_pose_dialog)
-        content.addWidget(self._pose_show_btn)
+        self._pose_export_btn = QPushButton("Export assigned pose results…")
+        self._pose_export_btn.setEnabled(False)
+        self._pose_export_btn.clicked.connect(self._export_pose_results)
+        content.addWidget(flow_row(self._pose_show_btn, self._pose_export_btn))
 
         self._refresh_pose_list()
         return panel
@@ -544,7 +596,7 @@ class ChemurTool(ToolInstance):
         self._traj_show_plots_btn = QPushButton("Show plots…")
         self._traj_show_plots_btn.setEnabled(False)
         self._traj_show_plots_btn.clicked.connect(self._open_traj_plots)
-        self._traj_export_btn = QPushButton("Export CSV…")
+        self._traj_export_btn = QPushButton("Export assigned trajectory…")
         self._traj_export_btn.setEnabled(False)
         self._traj_export_btn.clicked.connect(self._export_trajectory)
         content.addWidget(flow_row(self._traj_show_plots_btn, self._traj_export_btn))
@@ -557,6 +609,20 @@ class ChemurTool(ToolInstance):
                                  margins=(12, 0, 0, 0))
         content = panel.content_area.layout()
 
+        self._engine_info = QLabel("")
+        self._engine_info.setWordWrap(True)
+        content.addWidget(self._engine_info)
+        self._enclosure_cb = QCheckBox("Detect hydrophobic enclosure")
+        self._enclosure_cb.setChecked(True)
+        self._enclosure_cb.setToolTip("Uses the hydrophobic distance cutoff. Disabling enclosure restores ordinary hydrophobic contacts.")
+        content.addWidget(self._enclosure_cb)
+        self._assembly_path_label = ElidedLabel("No assembly override")
+        content.addWidget(self._assembly_path_label)
+        assembly_load = QPushButton("Load assembly override JSON…")
+        assembly_load.clicked.connect(self._load_assembly_override)
+        assembly_clear = QPushButton("Clear override")
+        assembly_clear.clicked.connect(self._clear_assembly_override)
+        content.addWidget(flow_row(assembly_load, assembly_clear))
         ph_row = QHBoxLayout()
         ph_row.addWidget(QLabel("Protonation pH:"))
         self._ph_spin = QDoubleSpinBox()
@@ -581,44 +647,57 @@ class ChemurTool(ToolInstance):
         scroll.setWidget(inner)
         content.addWidget(scroll)
 
-        grid.addWidget(QLabel("Rule"), 0, 0)
-        for col, (_key, label, *_rest) in enumerate(_CUTOFF_COLUMNS, start=1):
-            grid.addWidget(QLabel(label), 0, col)
+        grid.addWidget(QLabel("Geometry parameter"), 0, 0)
+        grid.addWidget(QLabel("Value"), 0, 1)
         row = 1
-        for rule_name, rule in self._default_rules().items():
-            grid.addWidget(QLabel(rule_name), row, 0)
-            for col, (key, _label, lo, hi, decimals, step) in enumerate(_CUTOFF_COLUMNS, start=1):
-                value = rule.get(key)
-                if not isinstance(value, (int, float)):
-                    continue
-                spin = QDoubleSpinBox()
-                spin.setRange(lo, hi)
-                spin.setDecimals(decimals)
-                spin.setSingleStep(step)
-                spin.setValue(float(value))
-                grid.addWidget(spin, row, col)
-                self._cutoff_spins[(rule_name, key)] = (spin, float(value))
+        previous_rule = None
+        for parameter in self._geometry_parameters():
+            rule_name, key = parameter["rule"], parameter["key"]
+            if rule_name != previous_rule:
+                label = QLabel(parameter.get("rule_label", rule_name))
+                label.setStyleSheet("font-weight: bold;")
+                grid.addWidget(label, row, 0, 1, 2)
+                row += 1
+                previous_rule = rule_name
+            text = parameter["label"]
+            units = parameter.get("units", "")
+            label = QLabel(text + (" (%s)" % units if units else ""))
+            label.setWordWrap(True)
+            description = parameter.get("description", text)
+            references = parameter.get("references", ())
+            tooltip = description + ("\n" + "\n".join(references) if references else "")
+            label.setToolTip(tooltip)
+            grid.addWidget(label, row, 0)
+            value = float(parameter["value"])
+            spin = QDoubleSpinBox()
+            spin.setRange(parameter["minimum"], parameter["maximum"])
+            spin.setDecimals(parameter["decimals"])
+            spin.setSingleStep(parameter["step"])
+            spin.setValue(value)
+            spin.setToolTip(tooltip)
+            grid.addWidget(spin, row, 1)
+            self._cutoff_spins[(rule_name, key)] = (spin, value)
             row += 1
 
         reset = QPushButton("Reset cutoffs to defaults")
         reset.clicked.connect(self._reset_cutoffs)
         content.addWidget(reset)
 
-        self._protonation_btn = QPushButton("Protonation report…")
+        self._protonation_btn = QPushButton("Chemical product report…")
         self._protonation_btn.setToolTip(
-            "Show the protonation state of each non-standard residue and fix any "
-            "that failed automatic protonation.")
+            "Show ligand and modified-polymer products, membership and diagnostics; correct standalone ligand SMILES.")
         self._protonation_btn.setEnabled(False)
         self._protonation_btn.clicked.connect(self._open_protonation_dialog)
         content.addWidget(self._protonation_btn)
         return panel
 
-    def _default_rules(self):
+    def _geometry_parameters(self):
         try:
-            from chemur.profile import load_profile
-            return load_profile("default").get("rules", {})
-        except Exception:
-            return {}
+            from chemur.geometry_catalogue import geometry_parameters
+            return geometry_parameters("default")
+        except (ImportError, AttributeError):
+            # The compatibility gate displays the update instruction and prevents analysis.
+            return []
 
     def _reset_cutoffs(self):
         for spin, default in self._cutoff_spins.values():
@@ -638,105 +717,99 @@ class ChemurTool(ToolInstance):
         if structure is None:
             self.session.logger.error("Chemur: choose a structure first.")
             return
-        from .runner import run_interactions
-
-        self._status.setText("Analyzing…")
-        self._analyze_btn.setEnabled(False)
-        try:
-            run = run_interactions(
-                self.session,
-                structure,
-                protonate=self._protonate_cb.isChecked(),
-                protonate_ph=self._ph_spin.value(),
-                ligand_smiles=self._ligand_smiles_overrides or None,
-                add_hydrogens=self._addh_cb.isChecked(),
-                rule_overrides=self._collect_rule_overrides(),
-                selected_only=self._selected_cb.isChecked(),
-                skip_biopolymer_internal=self._skip_bio_cb.isChecked(),
-            )
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._status.setText("Error: %s" % e)
+        token = self._begin_run("static", [structure])
+        if token is None:
             return
-        finally:
-            self._analyze_btn.setEnabled(True)
-
-        rows = run.rows
-        self._rows = rows
-        self._ligand_report = run.ligand_report
-        self._populate(rows)
-        self._build_legend(rows)
-        if self._interchain_only:
+        from .runner import run_interactions
+        self._status.setText("Analyzing…")
+        try:
+            run = run_interactions(self.session, structure, **self._analysis_options(structure),
+                add_hydrogens=self._addh_cb.isChecked(), selected_only=self._selected_cb.isChecked(),
+                skip_biopolymer_internal=self._skip_bio_cb.isChecked(), cancel_check=token.check_cancelled)
+            token.check_cancelled()
+            state = self._commit_run(token, run)
+            self._static_run = run
+            self._activate_result(state)
+            self._rows = run.rows
+            self._ligand_report = run.ligand_report
+            self._populate(run.rows)
+            self._build_legend(run.rows)
             self._reapply_pseudobond_visibility()
-        self._export_btn.setEnabled(bool(rows))
-        self._export_scope.setEnabled(bool(rows))
-        self._export_interactions_btn.setEnabled(bool(rows))
-        # _populate already drew the tree (nested, or flat for an active query)
-        # and set the status line accordingly.
-        self._refresh_protonation_ui()
+            for button in (self._export_btn, self._export_scope, self._export_interactions_btn):
+                button.setEnabled(bool(run.rows))
+            self._refresh_protonation_ui()
+        except RunCancelled:
+            if not self._lifecycle.disposed:
+                self._status.setText("Analysis cancelled because its source changed or closed.")
+        except Exception as error:
+            if not self._lifecycle.disposed:
+                self.session.logger.report_exception()
+                self._status.setText("Error: %s" % error)
+        finally:
+            self._finish_run(token)
 
     # ----- trajectory analysis ---------------------------------------------
 
     def _analyze_trajectory(self):
         structure = self._model_button.value
-        if structure is None:
-            self.session.logger.error("Chemur: choose a structure first.")
+        if structure is None or structure.num_coordsets < 2:
+            self._traj_status.setText("Choose a structure with multiple coordinate sets.")
             return
-        if structure.num_coordsets < 2:
-            self._traj_status.setText(
-                "#%s has one frame; load a trajectory (multiple coordsets) first."
-                % structure.id_string)
+        token = self._begin_run("trajectory", [structure])
+        if token is None:
             return
         from .runner import run_trajectory
-
-        stop = self._traj_stop.value() or None  # 0 ('end') -> all frames
         self._traj_status.setText("Analyzing trajectory…")
-        self._traj_analyze_btn.setEnabled(False)
+        completed = False
         try:
-            run = run_trajectory(
-                self.session,
-                structure,
-                exclude_solvent=self._traj_excl_solvent.isChecked(),
-                exclude_ions=self._traj_excl_ions.isChecked(),
-                frame_start=self._traj_start.value(),
-                frame_stop=stop,
-                frame_stride=self._traj_stride.value(),
-                processes=self._traj_processes.value(),
-                protonate=self._protonate_cb.isChecked(),
-                protonate_ph=self._ph_spin.value(),
-                ligand_smiles=self._ligand_smiles_overrides or None,
-                rule_overrides=self._collect_rule_overrides(),
-                progress=self._traj_progress,
-            )
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._traj_status.setText("Error: %s" % e)
-            return
+            run = run_trajectory(self.session, structure, **self._analysis_options(structure),
+                exclude_solvent=self._traj_excl_solvent.isChecked(), exclude_ions=self._traj_excl_ions.isChecked(),
+                frame_start=self._traj_start.value(), frame_stop=self._traj_stop.value() or None,
+                frame_stride=self._traj_stride.value(), processes=self._traj_processes.value(),
+                progress=self._traj_progress, cancel_check=token.check_cancelled)
+            token.check_cancelled()
+            state = self._commit_run(token, run)
+            self._traj_run = run
+            self._activate_result(state)
+            self._rows = []
+            self._ligand_report = run.ligand_report
+            self._populate([])
+            self._build_legend([])
+            self._refresh_protonation_ui()
+            for button in (self._export_scope, self._export_interactions_btn, self._export_btn):
+                button.setEnabled(False)
+            self._populate_occupancy(run)
+            self._build_frame_type_rows(run)
+            self._ensure_plot_dialog()
+            self._traj_plots.set_result(run.result, run.key_to_endpoints, frame_endpoints=run.frame_endpoints)
+            self._setup_frame_slider(run)
+            self._traj_show_plots_btn.setEnabled(True)
+            self._traj_export_btn.setEnabled(True)
+            self._open_traj_plots()
+            self._traj_status.setText("Analysed %d frames; %d distinct interactions." % (run.result.n_frames, self._traj_table_total))
+            completed = True
+        except RunCancelled:
+            if not self._lifecycle.disposed:
+                self._traj_status.setText("Trajectory analysis cancelled.")
+        except Exception as error:
+            if not self._lifecycle.disposed:
+                self.session.logger.report_exception()
+                self._traj_status.setText("Error: %s" % error)
         finally:
-            self._traj_analyze_btn.setEnabled(True)
-
-        self._traj_run = run
-        self._populate_occupancy(run)
-        self._build_frame_type_rows(run)
-        self._ensure_plot_dialog()
-        self._traj_plots.set_result(run.result, run.key_to_endpoints)
-        self._setup_frame_slider(run)
-        self._traj_show_plots_btn.setEnabled(True)
-        self._traj_export_btn.setEnabled(True)
-        self._open_traj_plots()  # pop the plots out into their own window
-        if self._traj_live_cb.isChecked():
-            self._redraw_frame_interactions()
-        msg = "Analysed %d frames; %d distinct interactions." % (
-            run.result.n_frames, self._traj_table_total)
-        if self._traj_table_total > self._traj_table_shown:
-            msg += " Table shows top %d by occupancy." % self._traj_table_shown
-        self._traj_status.setText(msg)
+            self._finish_run(token)
+        if completed and not self._lifecycle.disposed:
+            self._on_frame_slider(0)
 
     def _traj_progress(self, done, total):
+        token = self._lifecycle.active_run
+        if token is None:
+            raise RunCancelled("No active analysis")
+        token.check_cancelled()
         self._traj_status.setText("Analyzing trajectory… frame %d/%d" % (done, total))
         ui = getattr(self.session, "ui", None)
         if ui is not None and hasattr(ui, "processEvents"):
             ui.processEvents()
+        token.check_cancelled()
 
     def _ensure_plot_dialog(self):
         if self._traj_plots_dialog is None:
@@ -802,15 +875,13 @@ class ChemurTool(ToolInstance):
                 break
 
     def _show_traj_key(self, key):
-        if self._traj_run is None:
+        if self._traj_run is None or self._lifecycle.disposed:
             return
         self._open_traj_plots()
         self._traj_plots.show_key(key)
-        atoms = self._traj_run.key_to_atoms.get(key)
-        if atoms:
-            from chimerax.atomic import Atoms
-            self.session.selection.clear()
-            Atoms([a for a in atoms if a is not None]).selected = True
+        frame = self._current_trajectory_frame()
+        atoms = self._traj_run.frame_participants(frame, key)
+        self._select_atoms(atoms)
 
     def _setup_frame_slider(self, run):
         ids = run.frame_coordset_ids
@@ -825,7 +896,12 @@ class ChemurTool(ToolInstance):
             self._on_frame_slider(0)
 
     def _on_frame_slider(self, pos):
-        # User moved our slider: drive the 3D coordset and (live) redraw.
+        state = self._lifecycle.latest.get("trajectory")
+        if state is None or self._lifecycle.active_run is not None:
+            return
+        if self._traj_live_cb.isChecked():
+            self._activate_result(state)
+            self._install_coordset_handler(state.payload.structure)
         self._apply_frame(pos, set_coordset=True)
 
     def _apply_frame(self, pos, *, set_coordset):
@@ -860,7 +936,10 @@ class ChemurTool(ToolInstance):
     def _on_coordset_changed(self, _trig_name, data):
         # Fired by ChimeraX when the structure changes; sync our slider when the
         # trajectory plays (active coordset moves) unless we initiated the change.
-        if self._suppress_coordset_sync or self._traj_run is None:
+        owner = self._lifecycle.display_owner
+        if (self._lifecycle.disposed or self._lifecycle.active_run is not None
+                or owner is None or owner.mode != "trajectory"
+                or self._suppress_coordset_sync or self._traj_run is None):
             return
         structure, changes = data
         if structure is not self._traj_run.structure:
@@ -872,9 +951,8 @@ class ChemurTool(ToolInstance):
         try:
             pos = ids.index(cs_id)
         except ValueError:
-            # Coordset between analysed frames: show the frame number, leave the
-            # drawn interactions (and slider) on the last analysed frame.
             self._traj_frame_label.setText("%d (not analysed)" % cs_id)
+            self._redraw_frame_interactions()
             return
         self._traj_slider.blockSignals(True)
         self._traj_slider.setValue(pos)
@@ -907,49 +985,57 @@ class ChemurTool(ToolInstance):
 
     def _on_live_toggled(self, checked):
         if checked:
-            self._redraw_frame_interactions()
+            self._on_frame_slider(self._traj_slider.value())
+        else:
+            self._remove_coordset_handler()
+            state = self._lifecycle.display_owner
+            if state is not None and state.mode == "trajectory":
+                self._close_graphics(state.graphics)
+                state.graphics.clear()
+                self._rows = []
+                self._populate([])
+                self._build_legend([])
+                for button in (self._export_scope, self._export_interactions_btn, self._export_btn):
+                    button.setEnabled(False)
 
     def _redraw_frame_interactions(self):
-        if self._traj_run is None or not self._traj_live_cb.isChecked():
+        state = self._lifecycle.display_owner
+        if (self._lifecycle.disposed or self._lifecycle.active_run is not None
+                or state is None or state.mode != "trajectory" or self._traj_run is None
+                or not self._traj_live_cb.isChecked()):
             return
-        pos = self._traj_slider.value()
-        frame_indices = self._traj_run.result.frame_indices
-        if not (0 <= pos < len(frame_indices)):
+        frame_index = self._current_trajectory_frame()
+        if frame_index is None:
+            self._rows = []
+            self._populate([])
+            self._build_legend([])
+            self._close_graphics(state.graphics)
+            state.graphics.clear()
             return
-        frame_index = frame_indices[pos]
-        included = {t for t, on in self._traj_frame_type_included.items() if on}
+        included = {kind for kind, on in self._traj_frame_type_included.items() if on}
         from .runner import draw_frame_interactions
         try:
-            rows = draw_frame_interactions(
-                self.session, self._traj_run, frame_index, included_types=included)
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._traj_status.setText("Error drawing frame: %s" % e)
+            rows = draw_frame_interactions(self.session, self._traj_run, frame_index, included_types=included,
+                selected_only=self._selected_cb.isChecked(),
+                skip_biopolymer_internal=self._skip_bio_cb.isChecked())
+        except Exception as error:
+            self._traj_status.setText("Error drawing frame: %s" % error)
             return
+        self._close_dialog("_preview_dialog")
+        state.graphics[:] = [model for model in state.graphics if not getattr(model, "deleted", False)]
+        self._lifecycle.register_graphics(state, getattr(self._traj_run, "graphics", ()))
         self._rows = rows
-        self._ligand_report = []
+        self._ligand_report = self._traj_run.ligand_report
         self._populate(rows)
         self._build_legend(rows)
-        if self._interchain_only:
-            self._reapply_pseudobond_visibility()
-        self._export_scope.setEnabled(bool(rows))
-        self._export_interactions_btn.setEnabled(bool(rows))
-        self._export_btn.setEnabled(bool(rows))
+        self._reapply_pseudobond_visibility()
+        for button in (self._export_scope, self._export_interactions_btn, self._export_btn):
+            button.setEnabled(bool(rows))
+        self._refresh_protonation_ui()
 
     def _export_trajectory(self):
-        if self._traj_run is None:
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self.tool_window.ui_area, "Export trajectory interactions",
-            "chemur_trajectory.csv",
-            "CSV (*.csv);;JSON (*.json)")
-        if not path:
-            return
-        if path.lower().endswith(".json"):
-            self._traj_run.result.to_json(path)
-        else:
-            self._traj_run.result.to_csv(path)
-        self.session.logger.info("Chemur: exported trajectory data to %s" % path)
+        if self._traj_run is not None:
+            self._write_native_result(self._traj_run.result, "chemur_trajectory")
 
     # ----- docked-pose comparison ------------------------------------------
 
@@ -988,72 +1074,49 @@ class ChemurTool(ToolInstance):
             self._pose_list.item(i).setCheckState(state)
 
     def _analyze_poses(self):
-        receptor = self._pose_receptor.value
-        poses = self._checked_poses()
-        if receptor is None or not poses:
-            self._pose_status.setText("Choose a receptor and tick at least one pose.")
+        receptor, poses = self._pose_receptor.value, self._checked_poses()
+        if receptor is None or not poses or receptor in poses:
+            self._pose_status.setText("Choose a receptor and at least one different pose.")
             return
-        if receptor in poses:
-            self._pose_status.setText("The receptor cannot also be a pose.")
+        token = self._begin_run("poses", [receptor, *poses])
+        if token is None:
             return
         from . import pose_compare
-
-        # Drop any pseudobonds drawn for a previous pose run.
-        self._clear_pose_3d_groups()
-        if self._pose_dialog is not None:
-            self._pose_dialog.panel.uncheck_all_3d()
-
-        run_kwargs = dict(
-            protonate=self._protonate_cb.isChecked(),
-            protonate_ph=self._ph_spin.value(),
-            ligand_smiles=self._ligand_smiles_overrides or None,
-            add_hydrogens=self._addh_cb.isChecked(),
-            rule_overrides=self._collect_rule_overrides(),
-            skip_biopolymer_internal=True,
-        )
         self._pose_status.setText("Analysing %d poses…" % len(poses))
-        self._pose_btn.setEnabled(False)
         try:
-            comparison = pose_compare.compute_pose_comparison(
-                self.session, receptor, poses, run_kwargs,
-                context=self._pose_context.value(), progress=self._pose_progress)
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._pose_status.setText("Error: %s" % e)
-            return
+            options = self._analysis_options(receptor)
+            options.update(add_hydrogens=self._addh_cb.isChecked(), skip_biopolymer_internal=True)
+            comparison = pose_compare.compute_pose_comparison(self.session, receptor, poses, options,
+                context=self._pose_context.value(), progress=self._pose_progress, cancel_check=token.check_cancelled)
+            token.check_cancelled()
+            self._clear_pose_3d_groups()
+            self._commit_run(token, comparison)
+            self._pose_comparison = comparison
+            self._pose_positions = self._capture_pose_positions(comparison)
+            self._pose_show_btn.setEnabled(bool(comparison.rows))
+            self._pose_export_btn.setEnabled(bool(comparison.native_runs))
+            self._pose_status.setText("%d poses × %d residues; failed analyses excluded from consensus." % (len(comparison.rows), len(comparison.columns)))
+            self._open_pose_dialog()
+        except RunCancelled:
+            if not self._lifecycle.disposed:
+                self._pose_status.setText("Pose analysis cancelled.")
+        except Exception as error:
+            if not self._lifecycle.disposed:
+                self.session.logger.report_exception()
+                self._pose_status.setText("Error: %s" % error)
         finally:
-            self._pose_btn.setEnabled(True)
-
-        self._pose_comparison = comparison
-        has_data = bool(comparison.rows) and bool(comparison.columns)
-        if not has_data:
-            self._pose_show_btn.setEnabled(False)
-            # Short on screen, actionable on hover: the status label is a single
-            # elided line, so the "what to do about it" half would be cut off.
-            msg = "No protein-ligand interactions found."
-            tip = "No protein-ligand interactions found for the selected poses."
-            if comparison.n_untemplated:
-                msg += " %d ligand(s) not templated." % comparison.n_untemplated
-                tip += (" %d pose ligand(s) could not be templated — try enabling "
-                        "'Protonate ligands', or supply a ligand SMILES."
-                        % comparison.n_untemplated)
-            self._pose_status.setText(msg)
-            self._pose_status.setToolTip(tip)
-            return
-        n_unmapped = sum(1 for r in comparison.rows if not r.fully_mapped)
-        msg = "%d poses × %d residues; %d interaction type(s)." % (
-            len(comparison.rows), len(comparison.columns), len(comparison.types))
-        if n_unmapped:
-            msg += " %d pose(s) figure-only (no 3D mapping)." % n_unmapped
-        self._pose_status.setText(msg)
-        self._pose_show_btn.setEnabled(True)
-        self._open_pose_dialog()
+            self._finish_run(token)
 
     def _pose_progress(self, done, total):
+        token = self._lifecycle.active_run
+        if token is None:
+            raise RunCancelled("No active analysis")
+        token.check_cancelled()
         self._pose_status.setText("Analysing poses… %d/%d" % (done, total))
         ui = getattr(self.session, "ui", None)
         if ui is not None and hasattr(ui, "processEvents"):
             ui.processEvents()
+        token.check_cancelled()
 
     def _ensure_pose_dialog(self):
         if self._pose_dialog is None:
@@ -1072,49 +1135,45 @@ class ChemurTool(ToolInstance):
         self._pose_dialog.raise_()
         self._pose_dialog.activateWindow()
 
-    def _on_pose_cell_selected(self, row_index, col_key):
-        """Select the clicked pose+residue's atoms in 3D (no-op for figure-only poses)."""
-        rows = self._pose_comparison.cell_rows.get((row_index, col_key), [])
-        from chimerax.atomic import Atoms
-        atoms = [ep.atom for r in rows for ep in (r.endpoint1, r.endpoint2)
-                 if ep.atom is not None]
-        self.session.selection.clear()
-        if atoms:
-            Atoms(atoms).selected = True
-
-    def _on_pose_show_3d(self, pose_index, show):
-        """Draw or hide one pose's protein-ligand interactions as 3D pseudobonds."""
-        from .runner import draw_pose_rows, clear_pose_group
+    def _on_pose_cell_selected(self, pose, col_key):
         comparison = self._pose_comparison
-        if comparison is None or not (0 <= pose_index < len(comparison.rows)):
+        if comparison is None or self._lifecycle.disposed:
             return
-        pose_row = comparison.rows[pose_index]
-        group_name = "Chemur pose %s" % pose_row.name
-        if show:
-            # All of this pose's protein-ligand rows live across its cell_rows.
-            rows = [row for (idx, _key), rows in comparison.cell_rows.items()
-                    if idx == pose_index for row in rows]
-            try:
-                draw_pose_rows(self.session, rows, group_name)
-                self._pose_3d_groups[pose_index] = group_name
-                self.session.logger.info(
-                    "Chemur: drew %d interactions for %s in 3D."
-                    % (len(rows), pose_row.name))
-            except Exception as e:
-                self.session.logger.warning(
-                    "Chemur: could not draw %s in 3D (%s)" % (pose_row.name, e))
-        else:
-            clear_pose_group(self.session, group_name)
-            self._pose_3d_groups.pop(pose_index, None)
+        index = comparison.index_for_pose(pose)
+        if index is None:
+            return
+        rows = comparison.cell_rows.get((index, col_key), [])
+        self._select_atoms(atom for row in rows for ep in (row.endpoint1, row.endpoint2)
+                           for atom in (getattr(ep, "center_atoms", None) or [ep.atom]))
+
+    def _on_pose_show_3d(self, pose, show):
+        from .runner import draw_pose_rows
+        comparison = self._pose_comparison
+        if comparison is None or self._lifecycle.disposed:
+            return
+        index = comparison.index_for_pose(pose)
+        if index is None:
+            return
+        self._close_graphics(self._pose_3d_groups.pop(pose, ()))
+        if not show:
+            return
+        rows = {id(row): row for (idx, _), contacts in comparison.cell_rows.items()
+                if idx == index for row in contacts}
+        graphics = []
+        try:
+            draw_pose_rows(self.session, list(rows.values()),
+                           "Chemur pose %s (%x)" % (comparison.rows[index].name, id(self)), graphics=graphics)
+            self._pose_3d_groups[pose] = graphics
+            state = self._lifecycle.latest.get("poses")
+            if state is not None:
+                self._lifecycle.register_graphics(state, graphics, [comparison.receptor, pose])
+        except Exception as error:
+            self.session.logger.warning("Could not draw pose: %s" % error)
 
     def _clear_pose_3d_groups(self):
-        from .runner import clear_pose_group
-        for group_name in list(self._pose_3d_groups.values()):
-            try:
-                clear_pose_group(self.session, group_name)
-            except Exception:
-                pass
+        graphics = [model for handles in self._pose_3d_groups.values() for model in handles]
         self._pose_3d_groups = {}
+        self._close_graphics(graphics)
 
     # ----- protonation report ----------------------------------------------
 
@@ -1125,7 +1184,7 @@ class ChemurTool(ToolInstance):
         n_attention = sum(1 for r in self._ligand_report if r.status == "failed")
         if n_attention:
             self._protonation_cue.setText(
-                '⚠ %d non-standard residue(s) need protonation review — '
+                '⚠ %d chemical product(s) need chemistry review — '
                 '<a href="#">open report</a>' % n_attention)
             self._protonation_cue.show()
         else:
@@ -1148,23 +1207,22 @@ class ChemurTool(ToolInstance):
         self._protonation_dialog = None
 
     def _rerun_with_ligand_smiles(self, overrides):
-        """Merge dialog SMILES edits into the stored overrides and re-analyze.
-
-        ``overrides`` maps an upper-cased residue name to a SMILES string; the
-        edits accumulate so a fixed residue stays fixed on later analyses.
-        """
-        self._ligand_smiles_overrides.update(overrides)
-        self._analyze()
+        state = self._lifecycle.display_owner
+        if state is None or state.mode not in {"static", "trajectory"} or self._lifecycle.disposed:
+            return
+        source = state.source_models[0]
+        self._source_overrides.setdefault(source, {}).update(overrides)
+        self._model_button.value = source
+        self._input_model_changed()
+        if state.mode == "trajectory":
+            self._analyze_trajectory()
+        else:
+            self._analyze()
 
     # ----- results tree ----------------------------------------------------
 
     def _populate(self, rows):
-        """Index a fresh analysis, then draw the tree per the current search box.
-
-        Only computes the per-row data (search haystacks, type index); the tree
-        itself is built by ``_apply_search_filter`` so the nested-vs-flat layout
-        always matches whether a query is active.
-        """
+        self._view = ContactView(rows)
         self._row_haystacks = []
         self._rows_by_type = {}
         for idx, row in enumerate(rows):
@@ -1172,15 +1230,10 @@ class ChemurTool(ToolInstance):
             self._row_haystacks.append(_row_haystack(row))
         self._apply_search_filter()
 
-    def _row_check_state(self, idx):
-        """Tree checkbox state mirroring the row's pseudobond visibility, so the
-        check marks survive a tree rebuild (e.g. when the search query changes)."""
-        pb = self._rows[idx].pseudobond
-        if pb is not None and not pb.deleted and not pb.display:
-            return _UNCHECKED
-        return _CHECKED
+    def _row_check_state(self, idx, center=None):
+        return _CHECKED if self._view.member_visible(idx, center) else _UNCHECKED
 
-    def _build_nested(self, indices):
+    def _build_residue_tree(self, indices):
         """Draw the grouped tree (Section → Chain → Residue → interaction)."""
         section_nodes = {}
         chain_nodes = {}
@@ -1246,20 +1299,20 @@ class ChemurTool(ToolInstance):
         self._tree.expandToDepth(0)
 
     def _build_flat(self, indices):
-        """Draw matching interactions as a flat, un-nested list (search mode)."""
+        indices = list(indices)
         for idx in indices:
             row = self._rows[idx]
-            leaf = QTreeWidgetItem([
-                "%s: %s ⇄ %s" % (row.interaction_type,
-                                 row.endpoint1.atom_label, row.endpoint2.atom_label),
-                _fmt(row.distance), _fmt(row.angle), _fmt(row.offset),
-            ])
+            if row.interaction_type == "hydrophobic_enclosure":
+                continue
+            leaf = QTreeWidgetItem(["%s: %s ⇄ %s" % (row.interaction_type, row.endpoint1.atom_label, row.endpoint2.atom_label),
+                                   _fmt(row.distance), _fmt(row.angle), _fmt(row.offset)])
             leaf.setData(0, _USER_ROLE, idx)
             leaf.setToolTip(0, row.geometry_tooltip())
             leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             leaf.setCheckState(0, self._row_check_state(idx))
             self._tree.addTopLevelItem(leaf)
             self._row_items[idx] = [leaf]
+        self._build_enclosure_tree(indices)
 
     def _build_legend(self, rows):
         # Clear previous legend widgets.
@@ -1274,7 +1327,11 @@ class ChemurTool(ToolInstance):
         for row in rows:
             counts[row.interaction_type] = counts.get(row.interaction_type, 0) + 1
         for itype in sorted(counts):
-            cb = QCheckBox("%s (%d)" % (itype, counts[itype]))
+            if itype == "hydrophobic_enclosure":
+                label = "%s (%d groups, %d contacts)" % (itype, len(self._view.groups), counts[itype])
+            else:
+                label = "%s (%d contacts)" % (itype, counts[itype])
+            cb = QCheckBox(label)
             cb.setChecked(True)
             cb.setIcon(_swatch(itype))
             cb.toggled.connect(lambda checked, t=itype: self._set_type_visible(t, checked))
@@ -1316,21 +1373,14 @@ class ChemurTool(ToolInstance):
         self._update_search_status(tokens)
 
     def _update_search_status(self, tokens):
-        if not tokens:
-            if self._interchain_only:
-                self._status.setText("%d of %d interactions (inter-chain only)"
-                                     % (len(self._row_items), len(self._rows)))
-            else:
-                self._status.setText("%d interactions" % len(self._rows))
-            return
-        self._status.setText("%d of %d interactions match"
-                             % (len(self._row_items), len(self._rows)))
+        self._status.setText("%d interaction groups · %d/%d contacts in view" %
+                             (self._view.native_count, len(self._row_items), len(self._rows)))
 
     # ----- visibility ------------------------------------------------------
 
     @staticmethod
     def _row_is_intrachain(row):
-        return row.endpoint1.chain_id == row.endpoint2.chain_id
+        return is_polymer_intrachain(row)
 
     def _on_interchain_toggled(self, checked):
         self._interchain_only = checked
@@ -1339,178 +1389,482 @@ class ChemurTool(ToolInstance):
         self._refresh_legend_states()
 
     def _reapply_pseudobond_visibility(self):
-        """Set each row's pseudobond display to its type-checkbox state; the
-        inter-chain gate in ``_apply_row_visibility`` then force-hides intra
-        rows when the filter is on."""
         for idx, row in enumerate(self._rows):
-            cb = self._type_checkboxes.get(row.interaction_type)
-            self._apply_row_visibility(idx, cb.isChecked() if cb else True)
+            pb = row.pseudobond
+            if pb is not None and not getattr(pb, "deleted", False):
+                pb.display = self._row_visible(idx)
+        self._sync_tree_checks()
+        self._refresh_legend_states()
 
     def _apply_row_visibility(self, idx, visible):
-        if idx < 0 or idx >= len(self._rows):
-            return
-        if self._interchain_only and self._row_is_intrachain(self._rows[idx]):
-            visible = False
-        was = self._syncing
-        self._syncing = True
-        try:
-            pb = self._rows[idx].pseudobond
-            if pb is not None and not pb.deleted:
-                pb.display = visible
-            state = _CHECKED if visible else _UNCHECKED
-            for leaf in self._row_items.get(idx, ()):
-                if leaf.checkState(0) != state:
-                    leaf.setCheckState(0, state)
-        finally:
-            self._syncing = was
+        if 0 <= idx < len(self._rows):
+            self._view.set_visible([idx], visible)
+            self._reapply_pseudobond_visibility()
 
     def _on_item_changed(self, item, column):
-        if self._syncing:
+        if self._syncing or self._lifecycle.disposed:
             return
         data = item.data(0, _USER_ROLE)
-        if data is None:
-            return  # group node: Qt cascades to leaf children, handled there
         visible = item.checkState(0) == _CHECKED
-        self._apply_row_visibility(int(data), visible)
-        self._refresh_legend_states()
+        if isinstance(data, tuple) and data[0] == "group":
+            self._view.set_group_visible(data[1], visible)
+        elif isinstance(data, tuple) and data[0] == "leg":
+            self._view.set_visible([data[1]], visible, data[2])
+        else:
+            indices = set()
+            self._collect_row_indices(item, indices)
+            self._view.set_visible(indices, visible)
+        self._reapply_pseudobond_visibility()
 
     def _set_type_visible(self, itype, visible):
         if self._syncing:
             return
-        for idx in self._rows_by_type.get(itype, ()):
-            self._apply_row_visibility(idx, visible)
+        self._view.set_visible(self._rows_by_type.get(itype, ()), visible)
+        self._reapply_pseudobond_visibility()
 
     def _set_all_visible(self, visible):
-        for idx in range(len(self._rows)):
-            self._apply_row_visibility(idx, visible)
-        for cb in self._type_checkboxes.values():
-            cb.blockSignals(True)
-            cb.setChecked(visible)
-            cb.blockSignals(False)
+        self._view.set_visible(range(len(self._rows)), visible)
+        self._reapply_pseudobond_visibility()
 
     def _refresh_legend_states(self):
-        # Sync each type checkbox to whether any of its rows are visible.
         for itype, cb in self._type_checkboxes.items():
-            visible = any(
-                self._rows[i].pseudobond is not None and not self._rows[i].pseudobond.deleted
-                and self._rows[i].pseudobond.display
-                for i in self._rows_by_type.get(itype, ())
-            )
             cb.blockSignals(True)
-            cb.setChecked(visible)
+            cb.setChecked(any(self._row_visible(i) for i in self._rows_by_type.get(itype, ())))
             cb.blockSignals(False)
 
     # ----- 3D selection + export ------------------------------------------
 
     def _tree_selection_changed(self):
-        items = self._tree.selectedItems()
-        if not items:
+        if self._lifecycle.disposed:
             return
-        indices = set()
-        for item in items:
+        indices, atoms = set(), []
+        def groups(item):
+            data = item.data(0, _USER_ROLE)
+            if isinstance(data, tuple) and data[0] == "group":
+                meta = self._view.groups[data[1]]["metadata"]
+                atoms.extend(self._active_id_to_atom.get(aid) for aid in [data[1], *meta.get("neighbor_atom_ids", ())])
+            for i in range(item.childCount()):
+                groups(item.child(i))
+        for item in self._tree.selectedItems():
             self._collect_row_indices(item, indices)
-        if not indices:
-            return
-        from chimerax.atomic import Atoms
-        atoms = []
-        for idx in indices:
-            if 0 <= idx < len(self._rows):
-                row = self._rows[idx]
-                atoms.append(row.endpoint1.atom)
-                atoms.append(row.endpoint2.atom)
-        if not atoms:
-            return
-        self.session.selection.clear()
-        Atoms(atoms).selected = True
+            groups(item)
+        for index in indices:
+            if 0 <= index < len(self._rows):
+                row = self._rows[index]
+                atoms.extend(atom for ep in (row.endpoint1, row.endpoint2)
+                             for atom in (getattr(ep, "center_atoms", None) or [ep.atom]))
+        if atoms:
+            self._select_atoms(atoms)
 
-    def _collect_row_indices(self, item, indices):
+    def _collect_row_indices(self, item, indices, *, visible_only=False):
         data = item.data(0, _USER_ROLE)
-        if data is not None:
-            indices.add(int(data))
-            return
-        for i in range(item.childCount()):
-            self._collect_row_indices(item.child(i), indices)
+        if isinstance(data, int):
+            indices.add(data)
+        elif isinstance(data, tuple) and data[0] == "leg":
+            if not visible_only or self._view.member_visible(data[1], data[2]):
+                indices.add(data[1])
+        else:
+            for i in range(item.childCount()):
+                self._collect_row_indices(item.child(i), indices, visible_only=visible_only)
 
     def _export_diagram(self):
-        if not self._rows:
-            self.session.logger.error("Chemur: run an analysis first.")
+        state = self._lifecycle.display_owner
+        if state is None or not self._rows:
             return
-        structure = self._model_button.value
-        if structure is None:
-            self.session.logger.error("Chemur: choose a structure first.")
-            return
-        selected_residues = {a.residue for a in structure.atoms if a.selected}
+        structure = state.source_models[0]
+        selected_residues = {a.residue for model in state.source_models for a in model.atoms if a.selected}
         if not selected_residues:
-            self.session.logger.error(
-                "Chemur: select a ligand or residue(s) first, then Export.")
-            self._status.setText("Select a ligand or residue(s) first.")
+            self.session.logger.error("Select a ligand or residue first.")
             return
-
         from .diagram import build_scene
-        title = structure.name
         try:
-            scene = build_scene(self.session, structure, self._rows, selected_residues)
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._status.setText("Diagram error: %s" % e)
+            scene = build_scene(self.session, structure, self._rows_for_scope(), selected_residues,
+                                native_result=self._active_result, id_to_atom=self._active_id_to_atom)
+        except Exception as error:
+            self.session.logger.error("Diagram error: %s" % error)
             return
-
-        # Show an interactive preview; the user edits and saves from the dialog.
-        self._preview_dialog = DiagramPreviewDialog(
-            self.tool_window.ui_area, self.session, scene, title)
+        self._close_dialog("_preview_dialog")
+        self._preview_dialog = DiagramPreviewDialog(self.tool_window.ui_area, self.session, scene, structure.name)
         self._preview_dialog.show()
         self._preview_dialog.raise_()
-        summary = scene.summary
-        scope = "selected residues" if summary.get("scoped") else "all shown interactions"
-        self._status.setText("Diagram preview: %d residues, %d edges (%s)"
-                             % (summary["nodes"], summary["edges"], scope))
 
     def _rows_for_scope(self):
-        """The InteractionRows to export, per the export-scope dropdown."""
         scope = self._export_scope.currentData()
+        indices = {i for i in self._row_items if self._row_visible(i)}
         if scope == "rows":
-            indices = set()
+            selected = set()
             for item in self._tree.selectedItems():
-                self._collect_row_indices(item, indices)
-            return [self._rows[i] for i in sorted(indices)
-                    if 0 <= i < len(self._rows)]
-        if scope == "atoms":
-            return [r for r in self._rows
-                    if r.endpoint1.atom.selected or r.endpoint2.atom.selected]
-        return list(self._rows)
+                self._collect_row_indices(item, selected, visible_only=True)
+            indices &= selected
+        elif scope == "atoms":
+            indices = {i for i in indices
+                       if any(atom.selected for ep in (self._rows[i].endpoint1, self._rows[i].endpoint2)
+                              for atom in (getattr(ep, "center_atoms", None) or [ep.atom]))}
+        return [self._rows[i] for i in sorted(indices)]
 
     def _export_interactions(self):
-        if not self._rows:
-            self.session.logger.error("Chemur: run an analysis first.")
-            return
         rows = self._rows_for_scope()
         if not rows:
-            msg = ("No interactions in the chosen scope; select some rows or "
-                   "atoms first, or switch the scope to 'All interactions'.")
-            self.session.logger.error("Chemur: " + msg)
-            self._status.setText(msg)
+            self.session.logger.error("No displayed contacts in the chosen scope.")
             return
-
-        path, flt = QFileDialog.getSaveFileName(
-            self.tool_window.ui_area, "Export interactions",
-            "chemur_interactions.json", "JSON (*.json);;CSV (*.csv)")
+        path, selected_filter = QFileDialog.getSaveFileName(self.tool_window.ui_area, "Export displayed contacts", "chemur_displayed", "JSON (*.json);;CSV (*.csv)")
         if not path:
             return
-
         from . import export
-        is_csv = "csv" in flt.lower() or path.lower().endswith(".csv")
         try:
-            if is_csv:
-                export.write_csv(rows, path)
-            else:
-                export.write_json(rows, path)
-        except Exception as e:
-            self.session.logger.report_exception()
-            self._status.setText("Export error: %s" % e)
+            path, kind = export.resolve_output_path(path, selected_filter)
+            (export.write_csv if kind == "csv" else export.write_json)(rows, path)
+        except Exception as error:
+            self.session.logger.error("Export error: %s" % error)
             return
-        self.session.logger.info(
-            "Chemur exported %d interactions: %s" % (len(rows), path))
-        self._status.setText("Exported %d interactions to %s" % (len(rows), path))
+        self.session.logger.info("Chemur exported %d displayed contacts to %s" % (len(rows), path))
+
+    def _close_dialog(self, name):
+        dialog = getattr(self, name, None)
+        setattr(self, name, None)
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+
+    def _close_graphics(self, graphics):
+        seen = set()
+        for model in list(graphics):
+            if model is None or id(model) in seen or getattr(model, "deleted", False):
+                continue
+            seen.add(id(model))
+            if getattr(model, "id", None) is not None:
+                self.session.models.close([model])
+            else:
+                model.delete()
+
+    def _refresh_engine_info(self):
+        import importlib
+        try:
+            from .engine_support import require_engine
+            capabilities = require_engine()
+            engine = importlib.import_module("chemur")
+            core = importlib.import_module("chemur.core")
+            backend = "C++" if core.USING_CPP_CORE else "Python"
+            text = "Chemur %s · %s geometry · definitions %s" % (
+                engine.__version__, backend, capabilities.geometry_revision)
+            self._engine_info.setText(text)
+            self._engine_info.setToolTip(str(engine.__file__))
+        except Exception as error:
+            self._engine_info.setText("Chemur update required")
+            self._engine_info.setToolTip(str(error))
+
+    def _input_model_changed(self, *_args):
+        if self._lifecycle.disposed:
+            return
+        model = self._model_button.value
+        self._ligand_smiles_overrides = self._source_overrides.setdefault(model, {}) if model is not None else {}
+        path = self._assembly_paths.get(model)
+        self._assembly_path_label.setText(path or "No assembly override")
+
+    def _load_assembly_override(self):
+        model = self._model_button.value
+        if model is None:
+            self.session.logger.error("Choose the structure whose chemistry will be corrected first.")
+            return
+        path, _ = QFileDialog.getOpenFileName(self.tool_window.ui_area, "Load Chemur assembly override", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            from chemur.assemblies import load_assembly_overrides
+            load_assembly_overrides(path)
+        except Exception as error:
+            self.session.logger.error("Invalid assembly override: %s" % error)
+            return
+        self._assembly_paths[model] = path
+        self._input_model_changed()
+
+    def _clear_assembly_override(self):
+        self._assembly_paths.pop(self._model_button.value, None)
+        self._input_model_changed()
+
+    def _analysis_options(self, structure):
+        return dict(
+            protonate=self._protonate_cb.isChecked(), protonate_ph=self._ph_spin.value(),
+            ligand_smiles=dict(self._source_overrides.get(structure, {})) or None,
+            rule_overrides=self._collect_rule_overrides(),
+            assembly_overrides=self._assembly_paths.get(structure),
+            hydrophobic_enclosure=self._enclosure_cb.isChecked(),
+        )
+
+    def _begin_run(self, mode, source_models):
+        if self._lifecycle.disposed or self._lifecycle.active_run is not None:
+            return None
+        try:
+            from .engine_support import require_engine
+            require_engine()
+            token = self._lifecycle.begin_run(mode, source_models)
+        except Exception as error:
+            self.session.logger.error(str(error))
+            return None
+        self._remove_coordset_handler()
+        for button in (self._analyze_btn, self._traj_analyze_btn, self._pose_btn):
+            button.setEnabled(False)
+        return token
+
+    def _finish_run(self, token):
+        self._lifecycle.finish_run(token)
+        if self._lifecycle.disposed:
+            return
+        for button in (self._analyze_btn, self._traj_analyze_btn, self._pose_btn):
+            button.setEnabled(True)
+        owner = self._lifecycle.display_owner
+        if owner is not None and owner.mode == "trajectory" and self._traj_live_cb.isChecked():
+            self._install_coordset_handler(owner.payload.structure)
+
+    def _commit_run(self, token, payload):
+        previous = self._lifecycle.latest.get(token.mode)
+        state = self._lifecycle.commit(token, payload)
+        retained = {id(g) for current in self._lifecycle.latest.values() for g in current.graphics}
+        if previous is not None:
+            self._close_graphics([g for g in previous.graphics if id(g) not in retained])
+        return state
+
+    def _activate_result(self, state):
+        if self._lifecycle.disposed:
+            return
+        if self._lifecycle.display_owner is not state:
+            self._close_dialog("_preview_dialog")
+            self._close_dialog("_protonation_dialog")
+        for current in self._lifecycle.latest.values():
+            if current.mode in ("static", "trajectory"):
+                for model in current.graphics:
+                    if not getattr(model, "deleted", False):
+                        model.display = current is state
+        self._lifecycle.activate(state)
+        run = state.payload
+        self._active_result = getattr(run, "result", None)
+        self._active_id_to_atom = getattr(run, "id_to_atom", {})
+        label = ", ".join("#%s %s" % (m.id_string, m.name) for m in state.source_models)
+        self._owner_label.setText("Results: %s (%s)" % (label, state.mode))
+        self._export_assigned_btn.setEnabled(self._active_result is not None)
+        if state.mode != "trajectory":
+            self._remove_coordset_handler()
+
+    def _clear_display(self):
+        self._rows = []
+        self._ligand_report = []
+        self._active_result = None
+        self._active_id_to_atom = {}
+        self._populate([])
+        self._build_legend([])
+        self._owner_label.setText("No analysis results")
+        for button in (self._export_scope, self._export_interactions_btn, self._export_assigned_btn, self._export_btn):
+            button.setEnabled(False)
+        self._refresh_protonation_ui()
+        self._close_dialog("_preview_dialog")
+        self._close_dialog("_protonation_dialog")
+
+    def _on_models_removed(self, _trigger, models):
+        if self._lifecycle.disposed or self._cleanup_in_progress:
+            return
+        self._cleanup_in_progress = True
+        try:
+            owner = self._lifecycle.display_owner
+            removed = self._lifecycle.remove_models(models)
+            for model in models:
+                self._source_overrides.pop(model, None)
+                self._assembly_paths.pop(model, None)
+            self._close_graphics(removed.graphics)
+            modes = {state.mode for state in removed.invalidated}
+            if owner is not None and self._lifecycle.display_owner is None:
+                self._clear_display()
+            if "static" in modes:
+                self._static_run = None
+            if "trajectory" in modes:
+                self._remove_coordset_handler()
+                self._traj_run = None
+                self._traj_table.clear()
+                self._traj_item_keys.clear()
+                self._traj_slider.setEnabled(False)
+                self._traj_show_plots_btn.setEnabled(False)
+                self._traj_export_btn.setEnabled(False)
+                if self._traj_plots is not None:
+                    self._traj_plots.set_result(None)
+                self._close_dialog("_traj_plots_dialog")
+                self._traj_plots = None
+                self._traj_status.setText("Source structure closed.")
+            if "poses" in modes:
+                self._pose_comparison = None
+                self._clear_pose_3d_groups()
+                self._close_dialog("_pose_dialog")
+                self._pose_show_btn.setEnabled(False)
+                self._pose_export_btn.setEnabled(False)
+                self._pose_positions = {}
+                self._pose_status.setText("Comparison source closed.")
+            for state in removed.updated:
+                if state.mode == "poses":
+                    self._pose_comparison = state.payload
+                    live = {row.pose for row in state.payload.rows}
+                    for pose in list(self._pose_3d_groups):
+                        if pose not in live:
+                            self._close_graphics(self._pose_3d_groups.pop(pose))
+                    if self._pose_dialog is not None:
+                        self._pose_dialog.set_comparison(state.payload)
+                    self._pose_status.setText("%d remaining poses" % len(state.payload.rows))
+            self._refresh_pose_list()
+        finally:
+            self._cleanup_in_progress = False
+
+    def _capture_pose_positions(self, comparison):
+        receptor = comparison.receptor
+        if receptor is None:
+            return {}
+        inverse = receptor.scene_position.inverse()
+        return {row.pose: tuple((inverse * row.pose.scene_position).matrix.ravel()) for row in comparison.rows}
+
+    def _on_model_position_changed(self, _trigger, model):
+        if self._lifecycle.disposed:
+            return
+        token = self._lifecycle.active_run
+        if token is not None and token.mode == "poses" and any(model is source for source in token.source_models):
+            token.cancelled = True
+        comparison = self._pose_comparison
+        if comparison is None:
+            return
+        try:
+            positions = self._capture_pose_positions(comparison)
+            import numpy as np
+            changed = any(pose not in self._pose_positions or not np.allclose(pos, self._pose_positions[pose], atol=1e-7, rtol=0)
+                          for pose, pos in positions.items())
+        except (AttributeError, RuntimeError):
+            changed = True
+        if changed:
+            removed = self._lifecycle.invalidate("poses")
+            self._close_graphics(removed.graphics)
+            self._pose_comparison = None
+            self._clear_pose_3d_groups()
+            self._close_dialog("_pose_dialog")
+            self._pose_show_btn.setEnabled(False)
+            self._pose_export_btn.setEnabled(False)
+            self._pose_positions = {}
+            self._pose_status.setText("Relative model positions changed; re-analyse poses.")
+
+    def _build_nested(self, indices):
+        indices = list(indices)
+        self._build_residue_tree([i for i in indices if self._rows[i].interaction_type != "hydrophobic_enclosure"])
+        self._build_enclosure_tree(indices)
+
+    def _build_enclosure_tree(self, indices):
+        allowed = set(indices)
+        records = {atom.atom_id: atom for atom in getattr(self._active_result, "atoms", ())}
+        for center, group in self._view.groups.items():
+            children = [i for i in group["indices"] if i in allowed]
+            if not children:
+                continue
+            metadata = group["metadata"]
+            record = records.get(center)
+            label = record.label if record is not None else "atom %s" % center
+            neighbors = metadata.get("neighbor_atom_ids", ())
+            maximum = max((float(leg["distance"]) for leg in metadata.get("legs", ())), default=None)
+            parent = QTreeWidgetItem(["Hydrophobic enclosure: %s (%d neighbours)" % (label, len(neighbors)), _fmt(maximum), "", ""])
+            _make_group(parent)
+            parent.setData(0, _USER_ROLE, ("group", center))
+            parent.setToolTip(0, "One enclosed centre; distance is the maximum constituent distance. Expand for individual contacts.")
+            self._tree.addTopLevelItem(parent)
+            for idx in children:
+                row = self._rows[idx]
+                child = QTreeWidgetItem(["%s ⇄ %s" % (row.endpoint1.atom_label, row.endpoint2.atom_label), _fmt(row.distance), "", ""])
+                child.setData(0, _USER_ROLE, ("leg", idx, center))
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(0, self._row_check_state(idx, center))
+                child.setToolTip(0, row.geometry_tooltip())
+                parent.addChild(child)
+                self._row_items.setdefault(idx, []).append(child)
+        self._sync_tree_checks()
+
+    def _sync_tree_checks(self):
+        was = self._syncing
+        self._syncing = True
+        partial = Qt.CheckState.PartiallyChecked
+        def sync(item):
+            data = item.data(0, _USER_ROLE)
+            child_states = [sync(item.child(i)) for i in range(item.childCount())]
+            if isinstance(data, tuple) and data[0] == "leg":
+                state = self._row_check_state(data[1], data[2])
+            elif isinstance(data, int):
+                state = self._row_check_state(data)
+            elif child_states:
+                state = child_states[0] if all(v == child_states[0] for v in child_states) else partial
+            else:
+                state = _UNCHECKED
+            item.setCheckState(0, state)
+            return state
+        try:
+            for index in range(self._tree.topLevelItemCount()):
+                sync(self._tree.topLevelItem(index))
+        finally:
+            self._syncing = was
+
+    def _row_visible(self, idx):
+        row = self._rows[idx]
+        return (self._view.row_visible(idx)
+                and not (row.pseudobond is not None and getattr(row.pseudobond, "deleted", False))
+                and not (self._interchain_only and self._row_is_intrachain(row))
+                and all(not getattr(atom, "deleted", False) for ep in (row.endpoint1, row.endpoint2)
+                        for atom in (getattr(ep, "center_atoms", None) or [ep.atom])))
+
+    def _select_atoms(self, atoms):
+        from chimerax.atomic import Atoms
+        unique = {id(atom): atom for atom in atoms if atom is not None and not getattr(atom, "deleted", False)}
+        self.session.selection.clear()
+        if unique:
+            Atoms(list(unique.values())).selected = True
+
+    def _export_assigned(self):
+        if self._active_result is None:
+            return
+        self._write_native_result(self._active_result, "chemur_assigned")
+
+    def _write_native_result(self, result, default_name):
+        path, selected_filter = QFileDialog.getSaveFileName(self.tool_window.ui_area, "Export assigned results", default_name, "JSON (*.json);;CSV (*.csv)")
+        if not path:
+            return
+        from . import export
+        try:
+            path, kind = export.resolve_output_path(path, selected_filter)
+            (export.write_native_csv if kind == "csv" else export.write_native_json)(result, path)
+        except Exception as error:
+            self.session.logger.error("Export error: %s" % error)
+            return
+        self.session.logger.info("Chemur exported complete assigned results to %s" % path)
+
+    def _current_trajectory_frame(self):
+        run = self._traj_run
+        if run is None:
+            return None
+        try:
+            pos = run.frame_coordset_ids.index(run.structure.active_coordset_id)
+            return run.result.frame_indices[pos]
+        except ValueError:
+            return None
+
+    def _export_pose_results(self):
+        comparison = self._pose_comparison
+        if comparison is None:
+            return
+        directory = QFileDialog.getExistingDirectory(self.tool_window.ui_area, "Export assigned pose JSON and CSV reports")
+        if not directory:
+            return
+        from pathlib import Path
+        from .export import write_native_json, write_native_csv
+        import re
+        for index, pose_row in enumerate(comparison.rows, 1):
+            run = comparison.native_runs.get(pose_row.pose)
+            if run is None:
+                continue
+            name = "%03d_%s" % (index, re.sub(r"[^A-Za-z0-9_.-]+", "_", pose_row.name).strip("_"))
+            try:
+                write_native_json(run.result, Path(directory) / (name + ".json"))
+                write_native_csv(run.result, Path(directory) / (name + ".csv"))
+            except Exception as error:
+                self.session.logger.error("Pose export failed: %s" % error)
+                return
+        self.session.logger.info("Exported assigned pose reports to %s" % directory)
 
 
 class TrajectoryPlotsDialog(QDialog):
@@ -1558,8 +1912,8 @@ class DiagramPreviewDialog(QDialog):
     """Interactive 2D interaction diagram: drag residues, tune what's shown,
     recolour types, switch structure style, then save the view."""
 
-    _STYLE_OPTIONS = [("Colored", "default"), ("Black & white", "bw"),
-                      ("Bold", "bold"), ("Comic", "comic")]
+    _STYLE_OPTIONS = [("Colour", "default"), ("Black & white", "bw"),
+                      ("Bold", "bold")]
 
     def __init__(self, parent, session, scene, title=None):
         super().__init__(parent)
@@ -1619,6 +1973,31 @@ class DiagramPreviewDialog(QDialog):
         style_row.addWidget(combo, 1)
         col.addLayout(style_row)
 
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Font size (pt):"))
+        self._font_size = QSpinBox()
+        self._font_size.setRange(6, 24)
+        self._font_size.setValue(10)
+        self._font_size.setToolTip("Size of all diagram text, including chemical atom labels and charges.")
+        self._font_size.valueChanged.connect(self._view.set_font_size)
+        font_row.addWidget(self._font_size)
+        col.addLayout(font_row)
+
+        col.addWidget(QLabel("Residues / ligand assemblies:"))
+        self._unit_tree = QTreeWidget()
+        self._unit_tree.setHeaderHidden(True)
+        self._unit_tree.setMaximumHeight(150)
+        self._units_by_id = {id(unit): unit for unit in self._scene.units}
+        for unit in self._scene.units:
+            item = QTreeWidgetItem([unit.label])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, _CHECKED)
+            item.setData(0, _USER_ROLE, id(unit))
+            item.setToolTip(0, "Show this complete residue or ligand assembly and its enabled contacts.")
+            self._unit_tree.addTopLevelItem(item)
+        self._unit_tree.itemChanged.connect(self._on_unit_item_changed)
+        col.addWidget(self._unit_tree)
+
         col.addWidget(QLabel("Interaction types:"))
         for interaction_type in self._view.types_present():
             row = QHBoxLayout()
@@ -1666,6 +2045,11 @@ class DiagramPreviewDialog(QDialog):
                 parent.addChild(leaf)
         self._edge_tree.blockSignals(False)
 
+    def _on_unit_item_changed(self, item, column):
+        unit = self._units_by_id.get(item.data(0, _USER_ROLE))
+        if unit is not None:
+            self._view.set_unit_visible(unit, item.checkState(0) == _CHECKED)
+
     def _on_edge_item_changed(self, item, column):
         eid = item.data(0, _USER_ROLE)
         if eid is None:
@@ -1688,12 +2072,14 @@ class DiagramPreviewDialog(QDialog):
         checkbox.setIcon(QIcon(pix))
 
     def _save(self):
-        path, _flt = QFileDialog.getSaveFileName(
+        path, selected_format = QFileDialog.getSaveFileName(
             self, "Save interaction diagram", "chemur_interactions.png",
             "PNG image (*.png);;SVG image (*.svg);;PDF document (*.pdf)")
         if not path:
             return
         try:
+            from .export import resolve_output_path
+            path, _ = resolve_output_path(path, selected_format, allowed=("png", "svg", "pdf"))
             self._view.render_to(path)
         except Exception:
             self._session.logger.report_exception()
@@ -1702,27 +2088,25 @@ class DiagramPreviewDialog(QDialog):
 
 
 class LigandProtonationDialog(QDialog):
-    """Per-non-standard-residue protonation status, with inline SMILES fixes.
+    """Validated or unresolved ligand and modified-polymer product chemistry.
 
-    Lists each ligand residue: its protonation status (templated / failed), the
-    SMILES that set its chemistry, and its net formal charge. The SMILES cell is
-    editable, so a residue that failed automatic protonation can be given a
-    corrected SMILES; "Re-run analysis" feeds the edits back through the engine.
+    Standalone ligand SMILES can be edited by component identity. Connected and
+    polymer products stay read-only and use complete assembly-override files.
     """
 
-    _COLUMNS = ["Residue", "Status", "Net charge", "SMILES (editable)", "Reason"]
+    _COLUMNS = ["Components / assembly", "Status", "Net charge", "Product SMILES", "Diagnostic"]
 
     def __init__(self, parent, rerun_callback):
         super().__init__(parent)
-        self.setWindowTitle("Chemur protonation report")
+        self.setWindowTitle("Chemur chemical product report")
         self._rerun_callback = rerun_callback
         self._rows = []  # [(name, original_smiles, QLineEdit)]
 
         outer = QVBoxLayout(self)
         intro = QLabel(
-            "Each non-standard residue's protonation state comes from a SMILES "
-            "template. Residues marked ✗ failed automatic protonation and need a "
-            "SMILES below; edit any cell and re-run.")
+            "Validated ligand and modified-polymer products. Edit standalone ligand "
+            "SMILES by component identity; load assembly override JSON for complex, "
+            "covalently attached or modified-polymer products.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #666666;")
         outer.addWidget(intro)
@@ -1757,18 +2141,25 @@ class LigandProtonationDialog(QDialog):
             failed = entry.status == "failed"
             item = QTreeWidgetItem([
                 entry.residue_label,
-                "✗ failed" if failed else "✓ templated",
+                "✗ unresolved" if failed else "✓ validated",
                 "" if failed else _format_charge(entry.net_charge),
                 "",  # SMILES lives in an editable widget (set below)
                 entry.reason or "",
             ])
             self._tree.addTopLevelItem(item)
+            item.setToolTip(0, "Assembly: %s\nComponents: %s" % (
+                getattr(entry, "assembly_id", None) or entry.component_id,
+                ", ".join(getattr(entry, "component_ids", ()) or [entry.component_id])))
 
             smiles = entry.smiles_used or entry.input_smiles or ""
             edit = QLineEdit(smiles)
             edit.setPlaceholderText("enter a SMILES for this residue")
             self._tree.setItemWidget(item, 3, edit)
-            self._rows.append((entry.name, smiles, edit))
+            editable = getattr(entry, "editable", True)
+            edit.setReadOnly(not editable)
+            if not editable:
+                edit.setToolTip("Complex, attached or modified-polymer product: use an assembly override JSON file.")
+            self._rows.append((entry.component_id, smiles, edit))
 
             if failed:
                 color = QColor("#b35900")
@@ -1781,7 +2172,7 @@ class LigandProtonationDialog(QDialog):
         overrides = {}
         for name, original, edit in self._rows:
             text = edit.text().strip()
-            if text and text != original:
+            if not edit.isReadOnly() and text and text != original:
                 overrides[name.upper()] = text
         if not overrides:
             return
@@ -1812,6 +2203,7 @@ _TYPE_ALIASES = {
     "halogen_pi": "halogen-pi halogen pi",
     "ch_pi": "ch-pi ch pi",
     "hydrophobic": "hydrophobic",
+    "hydrophobic_enclosure": "hydrophobic enclosure enclosed surround surrounding",
 }
 
 
@@ -1828,7 +2220,7 @@ def _row_haystack(row):
 
 
 def _make_group(item):
-    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
     item.setCheckState(0, _CHECKED)
 
 

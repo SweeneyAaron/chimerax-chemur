@@ -165,6 +165,102 @@ def test_write_ligand_sdf_adds_hydrogens_by_valence():
     assert n_h == 4  # CH3 + OH
 
 
+def _hydroxyl_h(mol):
+    """The single hydrogen bonded to the molecule's only oxygen."""
+    o = next(a for a in mol.GetAtoms() if a.GetAtomicNum() == 8)
+    h = next(n for n in o.GetNeighbors() if n.GetAtomicNum() == 1)
+    conf = mol.GetConformer()
+    return tuple(conf.GetAtomPosition(h.GetIdx()))
+
+
+def _methanol():
+    c = _Atom(6, "C", (0.0, 0.0, 0.0))
+    o = _Atom(8, "O", (1.4, 0.0, 0.0))
+    return _Struct([c, o], [_CxBond(c, o, 1.0)])
+
+
+def _write(struct, **kwargs):
+    Chem = pytest.importorskip("rdkit.Chem", reason="RDKit not installed")
+    fh = tempfile.NamedTemporaryFile(suffix=".sdf", delete=False)
+    fh.close()
+    try:
+        sdf_io.write_ligand_sdf(struct, fh.name, **kwargs)
+        return next(iter(Chem.SDMolSupplier(fh.name, True, False)))
+    finally:
+        os.unlink(fh.name)
+
+
+def test_orient_polar_hydrogens_turns_hydroxyl_toward_acceptor():
+    """The bug this guards: an unoriented hydroxyl H silently costs a hydrogen bond.
+
+    RDKit places the OH hydrogen at an arbitrary torsion, so with an acceptor sat
+    off the C-O axis the H must swing toward it rather than stay where AddHs left it.
+    """
+    pytest.importorskip("rdkit.Chem", reason="RDKit not installed")
+    # Acceptor placed ~2.7 A from the hydroxyl O, off-axis so only one torsion suits.
+    acceptor = (2.0, 2.4, 0.0)
+    plain = _write(_methanol(), name="MOH", add_hydrogens=True)
+    turned = _write(_methanol(), name="MOH", add_hydrogens=True,
+                    acceptor_coords=[acceptor])
+
+    def h_to_acceptor(mol):
+        h = _hydroxyl_h(mol)
+        return sum((a - b) ** 2 for a, b in zip(h, acceptor)) ** 0.5
+
+    assert h_to_acceptor(turned) < h_to_acceptor(plain), \
+        "hydroxyl H should end up closer to the acceptor"
+    # It should be a credible hydrogen bond, not merely an improvement.
+    assert h_to_acceptor(turned) < 2.2
+
+
+def test_orient_polar_hydrogens_noop_without_acceptors():
+    """No acceptors given, or none in range: the hydrogen must not be invented."""
+    pytest.importorskip("rdkit.Chem", reason="RDKit not installed")
+    plain = _write(_methanol(), name="MOH", add_hydrogens=True)
+    none_given = _write(_methanol(), name="MOH", add_hydrogens=True,
+                        acceptor_coords=[])
+    far_away = _write(_methanol(), name="MOH", add_hydrogens=True,
+                      acceptor_coords=[(50.0, 50.0, 50.0)])
+    assert _hydroxyl_h(none_given) == pytest.approx(_hydroxyl_h(plain), abs=1e-6)
+    assert _hydroxyl_h(far_away) == pytest.approx(_hydroxyl_h(plain), abs=1e-6)
+
+
+def test_orient_polar_hydrogens_keeps_phenol_in_plane():
+    """A conjugated hydroxyl may flip 180 degrees but must stay in the ring plane."""
+    Chem = pytest.importorskip("rdkit.Chem", reason="RDKit not installed")
+    mol = Chem.AddHs(Chem.MolFromSmiles("Oc1ccccc1"), addCoords=True)
+    from rdkit.Chem import AllChem
+    AllChem.EmbedMolecule(mol, randomSeed=0xC0FFEE)
+    conf = mol.GetConformer()
+
+    o = next(a for a in mol.GetAtoms() if a.GetAtomicNum() == 8)
+    ring_c = next(n for n in o.GetNeighbors() if n.GetAtomicNum() == 6)
+    ortho = [n for n in ring_c.GetNeighbors() if n.GetIdx() != o.GetIdx()
+             and n.GetAtomicNum() == 6]
+
+    def plane_offset():
+        """Distance of the hydroxyl H from the plane of C(ring) and its two neighbours."""
+        import numpy
+        h = next(n for n in o.GetNeighbors() if n.GetAtomicNum() == 1)
+        p = [numpy.array(conf.GetAtomPosition(i.GetIdx()))
+             for i in (ring_c, ortho[0], ortho[1])]
+        normal = numpy.cross(p[1] - p[0], p[2] - p[0])
+        normal = normal / numpy.linalg.norm(normal)
+        return abs(numpy.dot(numpy.array(conf.GetAtomPosition(h.GetIdx())) - p[0],
+                             normal))
+
+    # An acceptor placed well out of the ring plane would drag a freely rotating
+    # hydroxyl with it; a conjugated one must refuse to leave the plane. Assert the
+    # H ends up genuinely in the plane rather than merely unmoved -- AddHs may have
+    # started it out of plane, in which case "unchanged" would still be wrong.
+    import numpy
+    o = next(a for a in mol.GetAtoms() if a.GetAtomicNum() == 8)
+    off_plane_acceptor = tuple(
+        numpy.array(conf.GetAtomPosition(o.GetIdx())) + numpy.array([0.0, 0.0, 2.8]))
+    sdf_io.orient_polar_hydrogens(mol, [off_plane_acceptor])
+    assert plane_offset() < 0.2, "conjugated hydroxyl H must stay in the ring plane"
+
+
 def test_write_ligand_sdf_infers_cationic_nitrogen():
     Chem = pytest.importorskip("rdkit.Chem", reason="RDKit not installed")
     # Quaternary ammonium: N bonded to 4 carbons. ChimeraX drops the +1, leaving an
@@ -184,6 +280,40 @@ def test_write_ligand_sdf_infers_cationic_nitrogen():
     assert mol is not None, "charged-N ligand must still sanitise"
     natom = next(a for a in mol.GetAtoms() if a.GetAtomicNum() == 7)
     assert natom.GetFormalCharge() == 1
+
+
+def test_sdf_uses_scene_coordinates_and_does_not_rotate_existing_hydrogens():
+    structure = _methanol()
+    hydrogen = _Atom(1, "H", (1.7, -0.9, 0.0))
+    structure.atoms.append(hydrogen)
+    structure.bonds.append(_CxBond(structure.atoms[1], hydrogen, 1.0))
+    for atom in structure.atoms:
+        atom.scene_coord = tuple(v + shift for v, shift in zip(atom.coord, (10., 20., 30.)))
+    molecule = _write(structure, add_hydrogens=True, acceptor_coords=[(12.0, 22.4, 30.0)])
+    conf = molecule.GetConformer()
+    for index, atom in enumerate(structure.atoms):
+        assert tuple(conf.GetAtomPosition(index)) == pytest.approx(atom.scene_coord, abs=1e-4)
+
+
+@pytest.mark.parametrize("smiles", ["OCCNC=O", "OCC[NH3+]", "OC=O"])
+def test_orientation_rejects_nonacceptors_and_covalent_neighbors(smiles, monkeypatch):
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    molecule = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    AllChem.EmbedMolecule(molecule, randomSeed=17)
+    conf = molecule.GetConformer()
+    # Keep a nonaccepting amide/cationic nitrogen near OH, while any chemically
+    # valid distant carbonyl is outside reach. The acid carbonyl is 1-3 excluded.
+    for atom in molecule.GetAtoms():
+        if atom.GetAtomicNum() != 1:
+            conf.SetAtomPosition(atom.GetIdx(), (float(atom.GetIdx()) * 10., 0., 0.))
+    conf.SetAtomPosition(0, (0., 0., 0.))
+    conf.SetAtomPosition(1, (-1.4, 0., 0.))
+    for atom in molecule.GetAtoms():
+        if atom.GetAtomicNum() == 7 or (smiles == "OC=O" and atom.GetIdx() == 2):
+            conf.SetAtomPosition(atom.GetIdx(), (1., 2., 0.))
+    monkeypatch.setattr(sdf_io, "_hbond_score", lambda *args: pytest.fail("No valid acceptor should be scored"))
+    assert sdf_io.orient_polar_hydrogens(molecule, []) == 0
 
 
 if __name__ == "__main__":  # pragma: no cover

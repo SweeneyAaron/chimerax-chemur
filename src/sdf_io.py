@@ -72,7 +72,8 @@ def molfile_text(atoms, bonds_with_order, name="LIG"):
     return "\n".join(lines) + "\n"
 
 
-def write_ligand_sdf(structure, path, *, name="LIG", add_hydrogens=False):
+def write_ligand_sdf(structure, path, *, name="LIG", add_hydrogens=False,
+                     acceptor_coords=None):
     """Write ``structure`` (a ChimeraX AtomicStructure) to an SDF at ``path``.
 
     Builds an RDKit molecule from the atoms + stored ``Bond.order`` and writes it
@@ -82,6 +83,11 @@ def write_ligand_sdf(structure, path, *, name="LIG", add_hydrogens=False):
     added by RDKit (valence-consistent; a ChimeraX ``addh`` can instead break the
     SDF's own valence so RDKit then fails to sanitise it). Falls back to a
     hand-written V2000 molfile only if RDKit is unavailable.
+
+    ``acceptor_coords`` — an iterable of ``(x, y, z)`` for the receptor's H-bond
+    acceptors — additionally orients the rotatable polar hydrogens RDKit just
+    added; see :func:`orient_polar_hydrogens` for why that matters. Omitting it
+    leaves the hydrogens exactly where RDKit put them.
     """
     try:
         from rdkit import Chem
@@ -115,7 +121,9 @@ def write_ligand_sdf(structure, path, *, name="LIG", add_hydrogens=False):
     mol = rw.GetMol()
     conf = Chem.Conformer(mol.GetNumAtoms())
     for a in atom_list:
-        c = a.coord
+        c = getattr(a, "scene_coord", None)
+        if c is None:
+            c = a.coord
         conf.SetAtomPosition(rindex[a], Point3D(float(c[0]), float(c[1]), float(c[2])))
     mol.AddConformer(conf, assignId=True)
     # ChimeraX's SDF reader drops formal charges, so a charged group (e.g. a
@@ -125,7 +133,13 @@ def write_ligand_sdf(structure, path, *, name="LIG", add_hydrogens=False):
     _infer_formal_charges(mol)
     Chem.SanitizeMol(mol)
     if add_hydrogens:
+        original_count = mol.GetNumAtoms()
         mol = Chem.AddHs(mol, addCoords=True)
+        if acceptor_coords is not None:
+            orient_polar_hydrogens(
+                mol, acceptor_coords,
+                hydrogen_indices=set(range(original_count, mol.GetNumAtoms())),
+            )
     mol.SetProp("_Name", name)
     writer = Chem.SDWriter(path)
     try:
@@ -133,6 +147,172 @@ def write_ligand_sdf(structure, path, *, name="LIG", add_hydrogens=False):
     finally:
         writer.close()
     return path
+
+
+# Rotatable polar donors: a hydroxyl/thiol hydrogen turns freely about its
+# heavy-heavy bond, so its position carries no information until something orients
+# it. Amine and amide N-H are excluded on purpose -- those are fixed by the
+# geometry of the heavy atoms, so moving them would be inventing chemistry.
+_ROTATABLE_DONORS = (8, 16)  # O, S
+
+# Candidate acceptors are only worth considering within a hydrogen bond's reach.
+_ACCEPTOR_SEARCH_RADIUS = 3.6   # A, donor heavy atom to acceptor
+_TORSION_STEP = 5               # degrees, for the sp3 scan
+
+
+def orient_polar_hydrogens(mol, acceptor_coords, *, hydrogen_indices=None):
+    """Rotate rotatable polar hydrogens toward nearby acceptors. Returns how many moved.
+
+    ``Chem.AddHs`` places a hydroxyl hydrogen at whatever torsion falls out of the
+    heavy-atom geometry, because RDKit knows nothing about the surroundings. That
+    position is arbitrary, and a hydroxyl H pointing the wrong way costs a real
+    hydrogen bond: the engine sees no O-H...A donor geometry and reports at best a
+    carbon-donor weak contact instead. Crystallography does not settle this either
+    -- X-ray structures at these resolutions carry no hydrogens at all -- so the
+    torsion has to be chosen, and choosing it by the acceptors around it is the
+    standard answer.
+
+    Only the hydrogen moves; every heavy atom is left exactly where it was.
+
+    ``acceptor_coords`` is an iterable of ``(x, y, z)`` for the receptor's
+    acceptors. The ligand's own acceptors are added automatically, so an
+    intramolecular hydrogen bond is not broken to chase a receptor atom.
+    """
+    import math
+
+    from rdkit.Geometry import Point3D
+    from chemur.chemistry import rdkit_atom_annotations
+
+    conf = mol.GetConformer()
+
+    def pos(idx):
+        p = conf.GetAtomPosition(idx)
+        return (p.x, p.y, p.z)
+
+    targets = [tuple(float(v) for v in c) for c in acceptor_coords]
+    ligand_acceptors = {index for index, annotation in rdkit_atom_annotations(mol).items()
+                        if annotation.acceptor_capacity > 0}
+
+    moved = 0
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() not in _ROTATABLE_DONORS:
+            continue
+        hydrogens = [n for n in atom.GetNeighbors() if n.GetAtomicNum() == 1]
+        heavy = [n for n in atom.GetNeighbors() if n.GetAtomicNum() != 1]
+        if len(hydrogens) != 1 or len(heavy) != 1:
+            continue
+
+        donor, root, hydrogen = atom.GetIdx(), heavy[0].GetIdx(), hydrogens[0].GetIdx()
+        if hydrogen_indices is not None and hydrogen not in hydrogen_indices:
+            continue
+        d_pos, r_pos, h_pos = pos(donor), pos(root), pos(hydrogen)
+
+        # Covalently adjacent (1-2 and 1-3) sites cannot orient a noncovalent H bond.
+        excluded = {donor}
+        for neighbor in atom.GetNeighbors():
+            excluded.add(neighbor.GetIdx())
+            excluded.update(other.GetIdx() for other in neighbor.GetNeighbors())
+        nearby = [t for t in targets
+                  if _distance(d_pos, t) <= _ACCEPTOR_SEARCH_RADIUS]
+        nearby += [pos(i) for i in ligand_acceptors
+                   if i not in excluded and _distance(d_pos, pos(i)) <= _ACCEPTOR_SEARCH_RADIUS]
+        if not nearby:
+            continue
+
+        # A hydroxyl on an sp2/aromatic root (phenol, carboxylic acid, enol) is
+        # conjugated and near-planar: rotating it out of plane would be wrong, so
+        # only the two in-plane torsions are on offer. An sp3 root turns freely.
+        #
+        # The in-plane pair has to be measured against a real substituent of the
+        # root, not against wherever AddHs happened to leave the hydrogen -- if
+        # that starting point is itself out of plane, rotating by 0/180 from it
+        # just yields two equally wrong positions.
+        conjugated = heavy[0].GetIsAromatic() or str(heavy[0].GetHybridization()) == "SP2"
+        reference = next((n for n in heavy[0].GetNeighbors()
+                          if n.GetIdx() != donor), None)
+        if conjugated and reference is not None:
+            current = _dihedral(pos(reference.GetIdx()), r_pos, d_pos, h_pos)
+            angles = (-current, 180.0 - current)
+        else:
+            angles = [float(a) for a in range(0, 360, _TORSION_STEP)]
+
+        best, best_score = None, None
+        for degrees in angles:
+            candidate = _rotate_about_axis(h_pos, r_pos, d_pos, math.radians(degrees))
+            score = max(_hbond_score(d_pos, candidate, t) for t in nearby)
+            if best_score is None or score > best_score:
+                best_score, best = score, candidate
+        if best is not None and _distance(best, h_pos) > 1e-6:
+            conf.SetAtomPosition(hydrogen, Point3D(*best))
+            moved += 1
+    return moved
+
+
+def _distance(a, b):
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _hbond_score(donor, hydrogen, acceptor):
+    """Rank a candidate H position: prefer a linear D-H...A and a short H...A.
+
+    The weighting is deliberately steep on distance so a hydrogen is not swung
+    toward a well-aligned but far-off acceptor in preference to a close one.
+    """
+    import math
+
+    dh_a = _distance(hydrogen, acceptor)
+    v1 = [d - h for d, h in zip(donor, hydrogen)]
+    v2 = [a - h for a, h in zip(acceptor, hydrogen)]
+    n1 = sum(c * c for c in v1) ** 0.5
+    n2 = sum(c * c for c in v2) ** 0.5
+    if n1 == 0 or n2 == 0:
+        return -1e9
+    cosine = sum(c1 * c2 for c1, c2 in zip(v1, v2)) / (n1 * n2)
+    angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+    return angle - 30.0 * dh_a
+
+
+def _dihedral(p0, p1, p2, p3):
+    """Signed dihedral angle p0-p1-p2-p3 in degrees."""
+    import math
+
+    b0 = [a - b for a, b in zip(p0, p1)]
+    b1 = [a - b for a, b in zip(p2, p1)]
+    b2 = [a - b for a, b in zip(p3, p2)]
+    n1 = sum(c * c for c in b1) ** 0.5
+    if n1 == 0:
+        return 0.0
+    b1 = [c / n1 for c in b1]
+    # Components of b0 and b2 perpendicular to the central b1 axis.
+    d0 = sum(a * b for a, b in zip(b0, b1))
+    d2 = sum(a * b for a, b in zip(b2, b1))
+    v = [a - d0 * b for a, b in zip(b0, b1)]
+    w = [a - d2 * b for a, b in zip(b2, b1)]
+    x = sum(a * b for a, b in zip(v, w))
+    cross = [b1[1] * v[2] - b1[2] * v[1],
+             b1[2] * v[0] - b1[0] * v[2],
+             b1[0] * v[1] - b1[1] * v[0]]
+    y = sum(a * b for a, b in zip(cross, w))
+    return math.degrees(math.atan2(y, x))
+
+
+def _rotate_about_axis(point, axis_start, axis_end, angle):
+    """Rotate ``point`` by ``angle`` radians about the axis through the two points."""
+    import math
+
+    ax = [e - s for e, s in zip(axis_end, axis_start)]
+    norm = sum(c * c for c in ax) ** 0.5
+    if norm == 0:
+        return point
+    ux, uy, uz = (c / norm for c in ax)
+    px, py, pz = (p - s for p, s in zip(point, axis_start))
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    dot = px * ux + py * uy + pz * uz
+    # Rodrigues' rotation formula.
+    rx = (px * cos_a + (uy * pz - uz * py) * sin_a + ux * dot * (1 - cos_a))
+    ry = (py * cos_a + (uz * px - ux * pz) * sin_a + uy * dot * (1 - cos_a))
+    rz = (pz * cos_a + (ux * py - uy * px) * sin_a + uz * dot * (1 - cos_a))
+    return (rx + axis_start[0], ry + axis_start[1], rz + axis_start[2])
 
 
 # Elements whose over-valence is unambiguously a positive formal charge (rather
@@ -167,7 +347,7 @@ def _write_molfile_fallback(structure, path, *, name="LIG"):
     atom_list = list(structure.atoms)
     index = {a: i + 1 for i, a in enumerate(atom_list)}
     atoms = [(a.element.name,
-              (float(a.coord[0]), float(a.coord[1]), float(a.coord[2])),
+              tuple(float(v) for v in getattr(a, "scene_coord", a.coord)),
               int(getattr(a, "formal_charge", 0) or 0))
              for a in atom_list]
     bonds_with_order = []

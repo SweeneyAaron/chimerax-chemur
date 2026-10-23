@@ -41,7 +41,8 @@ def _segment_break_before(cols, c):
     """True if column ``c`` starts a new sequence segment (chain change or gap)."""
     prev = cols[c - 1]
     cur = cols[c]
-    return cur.chain_id != prev.chain_id or cur.number != prev.number + 1
+    return (cur.chain_id != prev.chain_id or prev.number is None or cur.number is None
+            or cur.number not in (prev.number, prev.number + 1))
 
 
 def _draw_cell(ax, Rectangle, cx, ry, types, cf, alpha_by_type=None):
@@ -155,9 +156,9 @@ def draw_pose_msa(fig, comparison, *, include_types=None, one_letter=True,
         ax.set_xticklabels(labels, rotation=90, fontsize=7)
         ax.xaxis.set_ticks_position("top")
 
-        ylabels = [row.name for row in rows]
+        ylabels = [row.display_name for row in rows]
         if show_consensus:
-            ylabels.append("Consensus")
+            ylabels.append("Consensus (%d successful)" % sum(r.eligible_for_consensus for r in rows))
         ax.set_yticks(range(total_rows))
         ytl = ax.set_yticklabels(ylabels, fontsize=7)
         if show_consensus:
@@ -223,6 +224,8 @@ class PoseMsaPanel(QWidget):
         self._type_colors = {}          # interaction_type -> matplotlib RGBA
         self._type_checkboxes = {}
         self._pose_checkboxes = []
+        self._pose_checked = {}
+        self._comparison_epoch = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -298,9 +301,26 @@ class PoseMsaPanel(QWidget):
 
     # ----- data ------------------------------------------------------------
     def set_comparison(self, comparison):
+        same = comparison is self._comparison
+        self._comparison_epoch += 1
+        if not same:
+            self._pose_checked = {}
         self._comparison = comparison
-        self._type_included = {t: True for t in comparison.types}
-        self._type_colors = {}
+        if comparison is None:
+            self._layout = {"cols": [], "rows": []}
+            self._summary.setText("")
+            _clear_layout(self._types_layout)
+            _clear_layout(self._poses_layout)
+            self._pose_checkboxes = []
+            self._fig.clear()
+            self.canvas.draw_idle()
+            return
+        self._type_included = {t: self._type_included.get(t, True) if same else True
+                               for t in comparison.types}
+        if not same:
+            self._type_colors = {}
+        self._pose_checked = {row.pose: self._pose_checked.get(row.pose, False)
+                              for row in comparison.rows}
         self._update_summary()
         self._context_spin.blockSignals(True)
         self._context_spin.setValue(comparison.context)
@@ -312,8 +332,9 @@ class PoseMsaPanel(QWidget):
     def _update_summary(self):
         c = self._comparison
         self._summary.setText(
-            "%d poses · %d residues · %d interaction type(s)"
-            % (len(c.rows), len(c.columns), len(c.types)))
+            "%d poses (%d successful) · %d residues · %d interaction type(s)"
+            % (len(c.rows), sum(row.eligible_for_consensus for row in c.rows),
+               len(c.columns), len(c.types)))
 
     # ----- colour helpers (mirrors trajectory_plots) -----------------------
     def _color_for(self, itype):
@@ -356,15 +377,17 @@ class PoseMsaPanel(QWidget):
     def _build_pose_list(self):
         _clear_layout(self._poses_layout)
         self._pose_checkboxes = []
-        for idx, prow in enumerate(self._comparison.rows):
-            cb = QCheckBox(prow.name)
-            if prow.fully_mapped:
-                cb.setToolTip("Draw this pose's interactions as pseudobonds in 3D.")
+        epoch = self._comparison_epoch
+        for prow in self._comparison.rows:
+            cb = QCheckBox(prow.display_name)
+            if prow.eligible_for_consensus and prow.mapping_status != "unavailable":
+                cb.setToolTip("Draw the mapped contacts in 3D. Native counts include unmapped contacts.")
+                cb.setChecked(self._pose_checked.get(prow.pose, False))
                 cb.toggled.connect(
-                    lambda checked, i=idx: self._on_pose_3d_toggled(i, checked))
+                    lambda checked, pose=prow.pose, e=epoch: self._on_pose_3d_toggled(pose, checked, e))
             else:
                 cb.setEnabled(False)
-                cb.setToolTip("This pose's atoms could not be mapped to the 3D models.")
+                cb.setToolTip(prow.diagnostic or "This pose has no available 3D mapping.")
             self._pose_checkboxes.append(cb)
             self._poses_layout.addWidget(cb)
         self._poses_layout.addStretch(1)
@@ -374,9 +397,13 @@ class PoseMsaPanel(QWidget):
         self._type_included[itype] = checked
         self._redraw()
 
-    def _on_pose_3d_toggled(self, idx, checked):
+    def _on_pose_3d_toggled(self, pose, checked, epoch=None):
+        if (self._comparison is None or (epoch is not None and epoch != self._comparison_epoch)
+                or self._comparison.index_for_pose(pose) is None):
+            return
+        self._pose_checked[pose] = checked
         if self._on_pose_show_3d is not None:
-            self._on_pose_show_3d(idx, checked)
+            self._on_pose_show_3d(pose, checked)
 
     def _on_context_changed(self, value):
         if self._comparison is None:
@@ -409,7 +436,9 @@ class PoseMsaPanel(QWidget):
         row = int(round(event.ydata))
         cols = self._layout["cols"]
         if 0 <= col < len(cols) and 0 <= row < len(self._layout["rows"]):
-            self._on_cell_selected(row, cols[col].key)
+            pose = self._layout["rows"][row].pose
+            if self._comparison is not None and self._comparison.index_for_pose(pose) is not None:
+                self._on_cell_selected(pose, cols[col].key)
 
     def uncheck_all_3d(self):
         """Clear every 'show in 3D' checkbox (without firing extra toggles twice)."""

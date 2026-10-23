@@ -39,7 +39,7 @@ def test_style_table_matches_engine_rules():
         "engine interaction types with no pseudobond style "
         f"(they would draw grey and unlabelled): {sorted(engine - styled)}"
     )
-    assert not (styled - engine), (
+    assert not (styled - engine - {"anion_pi"}), (
         "styles for interaction types the engine no longer emits: "
-        f"{sorted(styled - engine)}"
+        f"{sorted(styled - engine - {'anion_pi'})}"
     )

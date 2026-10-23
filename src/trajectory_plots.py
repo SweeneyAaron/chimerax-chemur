@@ -24,6 +24,7 @@ from Qt.QtWidgets import (
 )
 
 from .colors import mpl_color
+from .view_state import passes_selection
 
 # Selection-scope options for the counts/fingerprint plots: (label, key).
 _SCOPES = [
@@ -65,7 +66,7 @@ def draw_counts(fig, frames, total, by_type, color_for, *, scope_label=None,
     return ax
 
 
-def draw_fingerprint(fig, result, *, max_rows=50, key_filter=None, cmap="Greens"):
+def draw_fingerprint(fig, result, *, max_rows=50, key_filter=None, frame_filter=None, cmap="Greens"):
     """Occupancy fingerprint heatmap. Returns the ordered keys (top to bottom).
 
     ``key_filter(key)`` (optional) restricts which interaction rows are shown (used
@@ -90,7 +91,7 @@ def draw_fingerprint(fig, result, *, max_rows=50, key_filter=None, cmap="Greens"
         for inter in frame.interactions:
             k = result.interaction_key(inter)
             r = row_of.get(k)
-            if r is not None:
+            if r is not None and (frame_filter is None or frame_filter(frame, inter)):
                 grid[r, j] = 1.0
 
     ax.imshow(grid, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
@@ -142,6 +143,7 @@ class TrajectoryPlotPanel(QWidget):
         self._on_key_selected = on_key_selected
         self._result = None
         self._key_to_endpoints = {}
+        self._frame_endpoints = None
         self._all_types = []
         self._type_included = {}          # counts: interaction_type -> bool
         self._type_colors = {}            # interaction_type -> matplotlib RGBA tuple
@@ -330,9 +332,10 @@ class TrajectoryPlotPanel(QWidget):
         self._recompute_counts()
 
     # ----- data + recompute ------------------------------------------------
-    def set_result(self, result, key_to_endpoints=None):
+    def set_result(self, result, key_to_endpoints=None, *, frame_endpoints=None):
         self._result = result
         self._key_to_endpoints = key_to_endpoints or {}
+        self._frame_endpoints = frame_endpoints
         self._markers.clear()
         self._current_frame = None
         if result is None:
@@ -358,15 +361,16 @@ class TrajectoryPlotPanel(QWidget):
     def _fp_scope(self):
         return self._fp_scope_combo.currentData() or "all"
 
-    def _passes_scope(self, key, scope):
+    def _passes_scope(self, key, scope, frame_index=None):
         if scope == "all":
             return True
-        groups = self._key_to_endpoints.get(key) or []
-        selected = [any(getattr(a, "selected", False) for a in grp) for grp in groups]
-        if scope == "any":
-            return any(selected)
-        # "both": every endpoint group has a selected atom (needs >= 2 groups).
-        return len(selected) >= 2 and all(selected)
+        if self._frame_endpoints is not None:
+            if frame_index is None:
+                return any(passes_selection(self._frame_endpoints(frame.frame_index, key), scope)
+                           for frame in self._result.frames
+                           if any(self._result.interaction_key(inter) == key for inter in frame.interactions))
+            return passes_selection(self._frame_endpoints(frame_index, key), scope)
+        return passes_selection(self._key_to_endpoints.get(key) or [], scope)
 
     def _compute_counts(self):
         result = self._result
@@ -380,7 +384,7 @@ class TrajectoryPlotPanel(QWidget):
                 t = inter.interaction_type
                 if t not in included_set:
                     continue
-                if not self._passes_scope(result.interaction_key(inter), self._scope()):
+                if not self._passes_scope(result.interaction_key(inter), self._scope(), frame.frame_index):
                     continue
                 by_type[t][j] += 1
                 total[j] += 1
@@ -413,6 +417,8 @@ class TrajectoryPlotPanel(QWidget):
         self._fp_keys = draw_fingerprint(
             self._fig_fp, self._result,
             key_filter=key_filter,
+            frame_filter=lambda frame, inter: self._passes_scope(
+                self._result.interaction_key(inter), scope, frame.frame_index),
             cmap=self._fp_cmap_combo.currentText() or "Greens",
         )
         self._markers.pop(self._fig_fp, None)

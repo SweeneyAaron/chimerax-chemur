@@ -8,7 +8,8 @@ from chimerax.atomic import AtomicStructureArg
 
 def chemur_interactions(session, structure, protonate=False, pH=7.4,
                          profile="default", ligandSmiles=None, addHydrogens=True,
-                         selectedOnly=False, skipProteinNucleic=False):
+                         selectedOnly=False, skipProteinNucleic=False,
+                         hydrophobicEnclosure=None, assemblyOverrides=None):
     from .runner import run_interactions
     return run_interactions(
         session,
@@ -16,38 +17,58 @@ def chemur_interactions(session, structure, protonate=False, pH=7.4,
         protonate=protonate,
         protonate_ph=pH,
         profile=profile,
-        ligand_smiles=parse_ligand_smiles(ligandSmiles),
+        ligand_smiles=_command_ligand_smiles(ligandSmiles),
         add_hydrogens=addHydrogens,
         selected_only=selectedOnly,
         skip_biopolymer_internal=skipProteinNucleic,
+        hydrophobic_enclosure=hydrophobicEnclosure,
+        assembly_overrides=assemblyOverrides,
     ).rows
 
 
 def parse_ligand_smiles(spec):
-    """Parse "NAME:SMILES, NAME2:SMILES2" (or NAME=SMILES) into a dict."""
+    """Parse NAME:SMILES or CHAIN:NAME:RESID=SMILES without splitting bonds."""
+    import re
     if not spec:
         return None
     out = {}
+    explicit = re.compile(r"^([A-Za-z0-9_.+-]+(?::[A-Za-z0-9_.+-]+:-?\d+[A-Za-z]?)?)\s*=(.+)$")
     for part in spec.replace(";", ",").split(","):
         part = part.strip()
         if not part:
             continue
-        if ":" in part:
+        match = explicit.match(part)
+        if match:
+            name, smiles = match.groups()
+        elif ":" in part:
+            if re.match(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+:-?\d+[A-Za-z]?(?:$|\s|=)", part):
+                raise ValueError("Full component identifiers require CHAIN:NAME:RESID=SMILES")
             name, smiles = part.split(":", 1)
-        elif "=" in part:
-            name, smiles = part.split("=", 1)
+            if not re.fullmatch(r"[A-Za-z0-9_.+-]+", name):
+                raise ValueError("Use NAME:SMILES or CHAIN:NAME:RESID=SMILES")
         else:
-            continue
-        name = name.strip()
-        smiles = smiles.strip()
-        if name and smiles:
-            out[name.upper()] = smiles
-    return out or None
+            raise ValueError("Use NAME:SMILES or CHAIN:NAME:RESID=SMILES")
+        name, smiles = name.strip(), smiles.strip()
+        if not name or not smiles:
+            raise ValueError("A ligand identifier and nonempty SMILES are required")
+        out[name.upper()] = smiles
+    if not out:
+        raise ValueError("A ligand identifier and nonempty SMILES are required")
+    return out
+
+
+def _command_ligand_smiles(spec):
+    try:
+        return parse_ligand_smiles(spec)
+    except ValueError as error:
+        from chimerax.core.errors import UserError
+        raise UserError(str(error)) from error
 
 
 def chemur_trajectory(session, structure, excludeSolvent=True, excludeIons=True,
                        start=0, stop=None, stride=1, processes=1,
-                       profile="default", ligandSmiles=None, protonate=False, pH=7.4):
+                       profile="default", ligandSmiles=None, protonate=False, pH=7.4,
+                       hydrophobicEnclosure=None, assemblyOverrides=None):
     """Analyse interactions per frame across a loaded trajectory; returns the run."""
     from .runner import run_trajectory
 
@@ -64,10 +85,12 @@ def chemur_trajectory(session, structure, excludeSolvent=True, excludeIons=True,
         frame_stride=stride,
         processes=processes,
         profile=profile,
-        ligand_smiles=parse_ligand_smiles(ligandSmiles),
+        ligand_smiles=_command_ligand_smiles(ligandSmiles),
         protonate=protonate,
         protonate_ph=pH,
         progress=_progress,
+        hydrophobic_enclosure=hydrophobicEnclosure,
+        assembly_overrides=assemblyOverrides,
     )
 
 
@@ -78,6 +101,8 @@ _desc = CmdDesc(
         ("pH", FloatArg),
         ("profile", StringArg),
         ("ligandSmiles", StringArg),
+        ("hydrophobicEnclosure", BoolArg),
+        ("assemblyOverrides", StringArg),
         ("addHydrogens", BoolArg),
         ("selectedOnly", BoolArg),
         ("skipProteinNucleic", BoolArg),
@@ -97,6 +122,8 @@ _traj_desc = CmdDesc(
         ("processes", IntArg),
         ("profile", StringArg),
         ("ligandSmiles", StringArg),
+        ("hydrophobicEnclosure", BoolArg),
+        ("assemblyOverrides", StringArg),
         ("protonate", BoolArg),
         ("pH", FloatArg),
     ],
